@@ -17,6 +17,9 @@ TaskHandle_t TaskTx;
 TaskHandle_t TaskRx;
 
 bool NACKReceived = false;
+int NACKResend = 0;
+bool outOfSync = false;
+int expected = 0;
 
 
 // Tâche d'émission (Core 1)
@@ -30,18 +33,28 @@ void txTask(void *pvParameters) {
                             {"Excepteur sint occaecat cupidatat non proident,"}
                         };
     size_t messageLen = sizeof(longMessage) - 1;
+    int i = sizeof(longMessage) / sizeof(longMessage[0]);
 
     for(;;) {
         if (NACKReceived)
         {
+            i = NACKResend - 1; // Ajuste l'index pour retransmettre le paquet NACKé
             Serial.println(">>> NACK reçu. Réémission du message...");
             NACKReceived = false;
+            txNode.TransmitMessage(longMessage[i], messageLen);
             
-        } else {
-             Serial.println(">>> Début de l'envoi du grand message...");
-            txNode.TransmitMessage(longMessage, messageLen);
+        } 
+        else if (outOfSync)
+        {
+            txNode.TransmitOutOfSyncMessage(expected); // Envoie le numéro de séquence attendu
+            outOfSync = false;
+        }
+        else 
+        {
+            Serial.println(">>> Début de l'envoi du grand message...");
+            txNode.TransmitMessage(longMessage[i], messageLen);
             Serial.println(">>> Envoi complet terminé.");
-        
+            i++;
             vTaskDelay(5000 / portTICK_PERIOD_MS); // Attend 5 secondes avant de recommencer
         }
         
@@ -83,7 +96,8 @@ void rxTask(void *pvParameters) {
                         }
                     } else {
                         Serial.printf("[Rx] ERREUR : Paquet hors séquence ! Reçu %d, attendu %d\n", seq, expectedSeq);
-
+                        outOfSync = true;
+                        expected = expectedSeq; // Stocke le numéro de séquence attendu pour la retransmission
                         // Note : Étant sur un lien filaire direct unidirectionnel (GPIO 12 -> 14), 
                         // le récepteur ne peut pas physiquement retransmettre un paquet NACK à l'émetteur.
                     }
@@ -101,11 +115,14 @@ void rxTask(void *pvParameters) {
                 case 0x04: // Trame de NACK
                     Serial.printf("[Rx] NACK reçu pour le paquet %d. Demande de retransmission.\n", seq);
                     NACKReceived = true;
+                    NACKResend = vol; // Stocke le numéro de séquence pour la retransmission
                     break;
             }
         } 
         else if (bytesRead != -1) { 
             Serial.printf("Erreur de décodage trame. Code : %d\n", bytesRead);
+            outOfSync = true;
+            expected = expectedSeq;
         }
         
         vTaskDelay(1 / portTICK_PERIOD_MS);

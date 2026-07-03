@@ -24,6 +24,7 @@ public:
     void TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol, uint8_t *payload, uint8_t payloadLen);
     int ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol);
     void TransmitMessage(uint8_t *message, size_t length);
+    void TransmitOutOfSyncMessage(uint8_t seq);
 };
 
 #endif
