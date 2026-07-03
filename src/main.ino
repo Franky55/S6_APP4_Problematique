@@ -16,18 +16,36 @@ Manchester rxNode(RX_PIN, true);
 TaskHandle_t TaskTx;
 TaskHandle_t TaskRx;
 
+bool NACKReceived = false;
+
+
 // Tâche d'émission (Core 1)
 void txTask(void *pvParameters) {
     // Message de 145 caractères (> 80) pour tester la fragmentation
-    uint8_t longMessage[] = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ";
+    uint8_t longMessage[][80] = {
+                            {"Lorem ipsum dolor sit amet, consectetur adipiscing elit. "},
+                            {"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "},
+                            {"Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris"},
+                            {"Duis aute irure dolor in reprehenderit in voluptate velit esse. "},
+                            {"Excepteur sint occaecat cupidatat non proident,"}
+                        };
     size_t messageLen = sizeof(longMessage) - 1;
 
     for(;;) {
-        Serial.println(">>> Début de l'envoi du grand message...");
-        txNode.TransmitMessage(longMessage, messageLen);
-        Serial.println(">>> Envoi complet terminé.");
+        if (NACKReceived)
+        {
+            Serial.println(">>> NACK reçu. Réémission du message...");
+            NACKReceived = false;
+            
+        } else {
+             Serial.println(">>> Début de l'envoi du grand message...");
+            txNode.TransmitMessage(longMessage, messageLen);
+            Serial.println(">>> Envoi complet terminé.");
         
-        vTaskDelay(5000 / portTICK_PERIOD_MS); // Attend 5 secondes avant de recommencer
+            vTaskDelay(5000 / portTICK_PERIOD_MS); // Attend 5 secondes avant de recommencer
+        }
+        
+       
     }
 }
 
@@ -65,6 +83,7 @@ void rxTask(void *pvParameters) {
                         }
                     } else {
                         Serial.printf("[Rx] ERREUR : Paquet hors séquence ! Reçu %d, attendu %d\n", seq, expectedSeq);
+
                         // Note : Étant sur un lien filaire direct unidirectionnel (GPIO 12 -> 14), 
                         // le récepteur ne peut pas physiquement retransmettre un paquet NACK à l'émetteur.
                     }
@@ -77,6 +96,11 @@ void rxTask(void *pvParameters) {
                         Serial.print((char)assemblyBuffer[i]);
                     }
                     Serial.println("\n-----------------------------------");
+                    break;
+                
+                case 0x04: // Trame de NACK
+                    Serial.printf("[Rx] NACK reçu pour le paquet %d. Demande de retransmission.\n", seq);
+                    NACKReceived = true;
                     break;
             }
         } 

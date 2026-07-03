@@ -3,6 +3,7 @@
 #define TYPE_START 0x01
 #define TYPE_DATA 0x02
 #define TYPE_END 0x03
+#define TYPE_OUT_OF_SYNC 0x04
 
 Manchester::Manchester(int _pinNum, bool _isReceiver)
 {
@@ -241,4 +242,8 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
     }
 
     TransmitFrame(TYPE_END, seq, 0, NULL, 0);
+}
+
+void Manchester::TransmitOutOfSyncMessage(uint8_t seq) {
+    TransmitFrame(TYPE_OUT_OF_SYNC, 0, seq, NULL, 0);
 }
