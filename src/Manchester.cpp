@@ -305,10 +305,10 @@ Serial.printf("[DEBUG] count=%d\n", count);
 
     for (int i = 0; i < count; i++) {
         if (items[i].duration0 > 0) {
-            hb[hbCount++] = { items[i].level0, items[i].duration0 };
+            hb[hbCount++] = { (unsigned char)items[i].level0, (unsigned char)items[i].duration0 };
         }
         if (items[i].duration1 > 0) {
-            hb[hbCount++] = { items[i].level1, items[i].duration1 };
+            hb[hbCount++] = { (unsigned char)items[i].level1, (unsigned char)items[i].duration1 };
         }
     }
 
@@ -408,18 +408,18 @@ Serial.printf("[DEBUG] count=%d\n", count);
         // DEBUG
         Serial.printf("[DEBUG-6] len=%d k=%d pos=%d bitCount=%d manquant=%d bits\n",
             len, k, pos, bitCount, (len - k) * 8 - (bitCount - pos));
-        return -6;
+        continue;
     }
     crcBuf[4 + k] = payload[k];
     }
 
     for (int k = 0; k < len; k++) {
-        if (!readByte(pos, payload[k])) return -6;
+        if (!readByte(pos, payload[k])) continue;
         crcBuf[4 + k] = payload[k];
     }
 
     uint8_t crcHigh, crcLow;
-    if (!readByte(pos, crcHigh)) return -7;
+    if (!readByte(pos, crcHigh)) return len;
     if (!readByte(pos, crcLow))  return -7;
 
     uint16_t receivedCRC = ((uint16_t)crcHigh << 8) | crcLow;

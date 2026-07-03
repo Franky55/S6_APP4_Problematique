@@ -30,7 +30,7 @@ void Pilote::initTx()
     cfg.rmt_mode             = RMT_MODE_TX;
     cfg.channel              = _chTx;
     cfg.gpio_num             = (gpio_num_t)_pinTx;
-    cfg.mem_block_num        = 4;           // 1 bloc = 64 items → suffisant par octet
+    cfg.mem_block_num        = 1;           // 1 bloc = 64 items → suffisant par octet
     cfg.clk_div              = 80;          // APB 80 MHz / 80 = 1 MHz → 1 tick = 1 µs
     cfg.tx_config.carrier_en         = false;
     cfg.tx_config.loop_en            = false;
@@ -66,7 +66,7 @@ void Pilote::initRx()
     cfg.rmt_mode      = RMT_MODE_RX;
     cfg.channel       = _chRx;
     cfg.gpio_num      = (gpio_num_t)_pinRx;
-    cfg.mem_block_num = 4;
+    cfg.mem_block_num = 1;
     cfg.clk_div       = 80;                 // 1 tick = 1 µs, même référence que TX
 
     // Filtre de bruit : impulsions < 10 µs ignorées
