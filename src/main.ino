@@ -10,24 +10,25 @@
 #define TX_PIN 12
 #define RX_PIN 14
 
+// Instanciation des objets
 Manchester txNode(TX_PIN, false);
 Manchester rxNode(RX_PIN, true);
 
+// Pointeurs pour les tâches FreeRTOS
 TaskHandle_t TaskTx;
 TaskHandle_t TaskRx;
 
 // Tâche d'émission (Core 1)
 void txTask(void *pvParameters) {
-    // uint8_t longMessage[] = "Allo comment ca va moi ca va bien mais je veux plus que 80 octets pour voir que les 2 messages se fait envoyer, mais seulement sur max 80 octets a la fois";
-    uint8_t longMessage[] = "Voici mon uatre message qui est grand et qui est plus que 80 octes pour satifaires les demande de la prob";
-    size_t messageLen = sizeof(longMessage) - 1;
-
+    uint8_t message[] = "Voici mon uatre message qui est grand et qui est plus que 80 octes pour satifaires les demande de la prob";
+    
     for(;;) {
         Serial.println(">>> Début de l'envoi du grand message...");
-        txNode.TransmitMessage(longMessage, messageLen);
+        txNode.TransmitMessage(message, sizeof(message));
         Serial.println(">>> Envoi complet terminé.");
         
-        vTaskDelay(5000 / portTICK_PERIOD_MS); // Attend 5 secondes avant de recommencer
+        // Délai obligatoire pour céder le processeur et éviter un blocage du Watchdog
+        vTaskDelay(2000 / portTICK_PERIOD_MS); 
     }
 }
 
@@ -44,7 +45,7 @@ void rxTask(void *pvParameters) {
 
     for(;;) {
         int bytesRead = rxNode.ReceiveFrame(frameBuffer, type, seq, vol);
-        
+
         if (bytesRead >= 0) {
             switch(type) {
                 case 0x01: // Trame de Début
@@ -90,12 +91,33 @@ void rxTask(void *pvParameters) {
 
 void setup() {
     Serial.begin(115200);
-    delay(1000); 
+    delay(1000); // Laisse le temps au port série de s'initialiser
 
-    xTaskCreatePinnedToCore(txTask, "TransmitTask", 10000, NULL, 1, &TaskTx, 1);
-    xTaskCreatePinnedToCore(rxTask, "ReceiveTask", 10000, NULL, 1, &TaskRx, 0);
+    // Épingle la tâche de transmission sur le Core 1 (App Core)
+    xTaskCreatePinnedToCore(
+        txTask,         /* Fonction de la tâche */
+        "TransmitTask", /* Nom de la tâche */
+        10000,          /* Taille de la pile (Stack size) */
+        NULL,           /* Paramètres passés à la tâche */
+        1,              /* Priorité de la tâche */
+        &TaskTx,        /* Handle de la tâche */
+        1               /* Épinglée au Core 1 */
+    );
+
+    // Épingle la tâche de réception sur le Core 0 (Pro Core)
+    xTaskCreatePinnedToCore(
+        rxTask,         /* Fonction de la tâche */
+        "ReceiveTask",  /* Nom de la tâche */
+        10000,          /* Taille de la pile */
+        NULL,           /* Paramètres passés à la tâche */
+        1,              /* Priorité de la tâche */
+        &TaskRx,        /* Handle de la tâche */
+        0               /* Épinglée au Core 0 */
+    );
 }
 
 void loop() {
+    // La boucle loop() tourne par défaut sur le Core 1.
+    // On la supprime car nos tâches FreeRTOS s'occupent de tout.
     vTaskDelete(NULL);
 }

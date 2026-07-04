@@ -1,10 +1,5 @@
 #include "Manchester.h"
 
-#define TYPE_START 0x01
-#define TYPE_DATA 0x02
-#define TYPE_END 0x03
-#define TYPE_NACK 0x04
-
 Manchester::Manchester(int _pinNum, bool _isReceiver)
 {
     pinNum = _pinNum;
@@ -55,6 +50,7 @@ uint16_t Manchester::CalculateCRC(uint8_t *data, size_t length)
 
 void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol, uint8_t *payload, uint8_t payloadLen) 
 {
+    // Nettoyage de la ligne pour éviter les transitions fantômes
     digitalWrite(pinNum, LOW);
     delayMicroseconds(bitDuration * 2); 
 
@@ -74,22 +70,28 @@ void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol, uint8_t *
     TransmitByte(startEndByte);
 }
 
+// --- NOUVELLE LOGIQUE DE RÉCEPTION ---
+
 int Manchester::ReceiveBit(uint32_t timeoutUs) 
 {
     uint32_t timeout = micros();
     bool lastState = digitalRead(pinNum);
     
+    // Attente de la prochaine transition
     while(digitalRead(pinNum) == lastState) {
-        if (micros() - timeout > timeoutUs) return -1; 
+        if (micros() - timeout > timeoutUs) return -1; // Timeout
     }
     
+    // Lecture de l'état APRÈS la transition
     bool newState = digitalRead(pinNum);
-    int bit = (newState == LOW) ? 1 : 0; 
+    int bit = (newState == LOW) ? 1 : 0; // H->L = 1, L->H = 0
     
+    //Maybe remove this, because it just adds more delay when the code will do clocks, so no need of more delays
+    // On avance de 75% d'un bit pour esquiver les rebonds et les transitions de frontières
+    // On atterrira parfaitement dans la zone d'attente du prochain milieu de bit
     uint32_t waitStart = micros();
-    // Utilisation de la variable bitDuration qui a été calculée dynamiquement !
-    while(micros() - waitStart < (bitDurationReceive * 0.75)) {
-        // Attente active
+    while(micros() - waitStart < (bitDuration * 0.75)) {
+        // Attente active très précise
     }
     
     return bit;
@@ -103,117 +105,90 @@ bool Manchester::ReceiveByte(uint8_t &byteOut, uint32_t timeoutUs)
         if (bit < 0) return false;
         
         currentByte |= (bit << (7 - b));
-        timeoutUs = bitDurationReceive * 1.5; 
+        timeoutUs = bitDuration * 1.5; // On resserre le timeout une fois lancé
     }
     byteOut = currentByte;
     return true;
 }
 
-uint32_t Manchester::MeasureBitDuration() {
-    uint32_t t[8]; 
-    uint32_t startWait = micros();
-    bool lastState = digitalRead(pinNum);
-    
-    // Attente initiale (Timeout défini par une constante, par exemple 3s)
-    while(digitalRead(pinNum) == lastState) {
-        if (micros() - startWait > 3000000UL) return 0; 
-    }
-    
-    // Capture des 8 transitions du PREAMBLE_BYTE
-    for(int i = 0; i < 8; i++) {
-        uint32_t timeout = micros();
-        while(digitalRead(pinNum) == lastState) {
-            if (micros() - timeout > 10000UL) return 0; 
-        }
-        t[i] = micros();
-        lastState = digitalRead(pinNum);
-    }
-    
-    uint32_t totalTime = t[7] - t[0]; // Durée totale pour 7 demi-bits
-    return (totalTime / 7) * 2;       // Conversion en durée de bit complet
-}
-
 int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol) 
 {
-    // 1. AUTO-BAUD : Mesure dynamique
-    uint32_t measured = MeasureBitDuration();
-    if (measured == 0) return -1; // Échec sync
+    uint16_t syncReg = 0;
+    bool synced = false;
     
-    bitDurationReceive = measured;
-    // Serial.printf("Sync réussie ! BitDuration détectée: %d us\n", bitDurationReceive);
-
-    // 2. Chasse au START (0x7E)
-    // On doit faire un petit délai car on est au milieu d'un bit du préambule
-    delayMicroseconds(bitDurationReceive * 0.75); 
-
-    uint8_t syncReg = 0;
-    bool startFound = false;
-    
-    for(int attempts = 0; attempts < 32; attempts++) {
-        int bit = ReceiveBit(bitDurationReceive * 2);
-        if (bit < 0) return -2; 
+    // 1. Chasse au Préambule et au Start en continu (Bit par Bit)
+    // On cherche la combinaison exacte 0x55 (Préambule) + 0x7E (Start) = 0x557E
+    for(int attempts = 0; attempts < 150; attempts++) {
+        int bit = ReceiveBit(attempts == 0 ? 3000000 : bitDuration * 2);
+        if (bit < 0) return -1; // Silence
         
+        // On pousse le nouveau bit dans le registre de 16 bits
         syncReg = (syncReg << 1) | bit;
-        if ((syncReg & 0xFF) == startEndByte) {
-            startFound = true;
+        
+        if (syncReg == 0x557E) {
+            synced = true;
             break;
         }
     }
     
-    if (!startFound) return -3; // 0x7E introuvable après le préambule
+    if (!synced) return -2; // Bruit continu, impossible de trouver 0x557E
 
-    // ---------------------------------------------------------
-    // 3. LECTURE CLASSIQUE (Entête, Payload, CRC)
-    // ---------------------------------------------------------
-    if(!ReceiveByte(type, bitDurationReceive * 1.5)) return -4;
-    if(!ReceiveByte(seq, bitDurationReceive * 1.5)) return -4;
+    // 2. Lecture de l'entête (On est maintenant parfaitement aligné sur les octets)
+    if(!ReceiveByte(type, bitDuration * 1.5)) return -4;
+    if(!ReceiveByte(seq, bitDuration * 1.5)) return -4;
     
     uint8_t len;
-    if(!ReceiveByte(len, bitDurationReceive * 1.5) || len > 80) return -5;
+    if(!ReceiveByte(len, bitDuration * 1.5) || len > 80) return -5;
     
-    if(!ReceiveByte(vol, bitDurationReceive * 1.5)) return -4; 
+    if(!ReceiveByte(vol, bitDuration * 1.5)) return -4; 
 
+    // 3. Extraction de la charge utile
     uint8_t crcData[84];
-    crcData[0] = type;
-    crcData[1] = seq; 
-    crcData[2] = len; 
-    crcData[3] = vol;
+    crcData[0] = type; crcData[1] = seq; crcData[2] = len; crcData[3] = vol;
     
     for(int i = 0; i < len; i++) {
-        if(!ReceiveByte(payload[i], bitDurationReceive * 1.5)) return -6; 
+        if(!ReceiveByte(payload[i], bitDuration * 1.5)) return -6; 
         crcData[4+i] = payload[i];
     }
 
+    // 4. Validation du CRC
     uint8_t crcHigh, crcLow;
-    if(!ReceiveByte(crcHigh, bitDurationReceive * 1.5) || !ReceiveByte(crcLow, bitDurationReceive * 1.5)) return -7;
+    if(!ReceiveByte(crcHigh, bitDuration * 1.5) || !ReceiveByte(crcLow, bitDuration * 1.5)) return -7;
     
     uint16_t receivedCRC = (crcHigh << 8) | crcLow;
     if(CalculateCRC(crcData, 4 + len) != receivedCRC) return -8; 
 
+    // 5. Validation du End (0x7E)
     uint8_t endByte;
-    if(!ReceiveByte(endByte, bitDurationReceive * 1.5) || endByte != startEndByte) return len; 
+    if(!ReceiveByte(endByte, bitDuration * 1.5) || endByte != startEndByte) return len; 
 
-    return len; 
+    return len; // Succès complet !
 }
 
 void Manchester::TransmitMessage(uint8_t *message, size_t length) 
 {
+    // Calcul du nombre total de paquets nécessaires (division entière arrondie vers le haut)
     uint8_t totalPackets = (length + 79) / 80;
     if (totalPackets == 0) totalPackets = 1; 
 
-    TransmitFrame(TYPE_START, 0, totalPackets, NULL, 0);
-    delay(10); 
+    // 1. Envoi de la trame de Début (Type 0x01, Séquence 0, Volume = Total de paquets, Pas de charge utile)
+    TransmitFrame(0x01, 0, totalPackets, NULL, 0);
+    delay(10); // Micro-pause inter-trame pour laisser le récepteur traiter l'information
 
+    // 2. Envoi des trames de Données (Type 0x02, par blocs de 80 octets max)
     size_t offset = 0;
     uint8_t seq = 1;
 
     while (offset < length) {
         uint8_t chunkLen = (length - offset > 80) ? 80 : (length - offset);
-        TransmitFrame(TYPE_DATA, seq, 0, message + offset, chunkLen);
+        
+        TransmitFrame(0x02, seq, 0, message + offset, chunkLen);
+        
         offset += chunkLen;
         seq++;
-        delay(10); 
+        delay(10); // Micro-pause inter-trame
     }
 
-    TransmitFrame(TYPE_END, seq, 0, NULL, 0);
+    // 3. Envoi de la trame de Fin (Type 0x03, Séquence finale, Volume 0, Pas de charge utile)
+    TransmitFrame(0x03, seq, 0, NULL, 0);
 }
