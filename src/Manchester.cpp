@@ -131,7 +131,12 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
         }
     }
     
-    if (!synced) return -2; // Bruit continu, impossible de trouver 0x557E
+    if (!synced)
+    {
+        Serial.print("syncReg: ");
+        Serial.println(syncReg, HEX);
+        return -2; // Bruit continu, impossible de trouver 0x557E
+    } 
 
     // 2. Lecture de l'entête (On est maintenant parfaitement aligné sur les octets)
     if(!ReceiveByte(type, bitDuration * 1.5)) return -4;
