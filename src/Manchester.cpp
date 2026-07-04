@@ -2,6 +2,10 @@
 
 // ============================================================
 //  Manchester — Implémentation (RMT via Pilote)
+//
+//  Convention unique dans tout ce fichier :
+//    bit 1 → HIGH puis LOW  (level0=1, level1=0)
+//    bit 0 → LOW  puis HIGH (level0=0, level1=1)
 // ============================================================
 
 // ------------------------------------------------------------
@@ -12,7 +16,6 @@ Manchester::Manchester(int pinTx, int pinRx, rmt_channel_t chTx, rmt_channel_t c
 {
     _pilote = new Pilote(pinTx, pinRx, chTx, chRx);
 
-    // Démarre l'écoute RX immédiatement si un pin RX est configuré
     if (pinRx >= 0) {
         _pilote->startRx();
     }
@@ -29,25 +32,30 @@ Manchester::~Manchester()
 
 // ------------------------------------------------------------
 //  encodeBit
-//  Convention Manchester II (IEEE 802.3) :
-//    1 → LOW  (durée = halfBit) puis HIGH (durée = halfBit)  → front montant
-//    0 → HIGH (durée = halfBit) puis LOW  (durée = halfBit)  → front descendant
+//
+//  Convention : bit 1 → HIGH→LOW  (front descendant au milieu)
+//               bit 0 → LOW→HIGH  (front montant au milieu)
+//
+//  CORRECTIF bug #1 : la version originale encodait bit 1 en
+//  LOW→HIGH, mais decodeItem interprétait HIGH→LOW comme bit 1.
+//  Les deux extrémités étaient inversées l'une par rapport à
+//  l'autre. Ici TX et RX utilisent la même convention.
 // ------------------------------------------------------------
 void Manchester::encodeBit(rmt_item32_t *items, int &idx, bool bit)
 {
     uint16_t h = Pilote::halfBit();
 
     if (bit) {
-        // Bit 1 : LOW → HIGH
-        items[idx].level0    = 0;   // LOW
-        items[idx].duration0 = h;
-        items[idx].level1    = 1;   // HIGH
-        items[idx].duration1 = h;
-    } else {
-        // Bit 0 : HIGH → LOW
+        // Bit 1 : HIGH → LOW
         items[idx].level0    = 1;   // HIGH
         items[idx].duration0 = h;
         items[idx].level1    = 0;   // LOW
+        items[idx].duration1 = h;
+    } else {
+        // Bit 0 : LOW → HIGH
+        items[idx].level0    = 0;   // LOW
+        items[idx].duration0 = h;
+        items[idx].level1    = 1;   // HIGH
         items[idx].duration1 = h;
     }
     idx++;
@@ -83,17 +91,13 @@ uint16_t Manchester::CalculateCRC(uint8_t *data, size_t length)
 //
 //  Format sur le fil :
 //    [PREAMBLE 0x55][FLAG 0x7E][TYPE][SEQ][LEN][VOL][PAYLOAD…][CRC_H][CRC_L][FLAG 0x7E]
-//
-//  Chaque octet → 8 items RMT Manchester.
-//  Total worst-case (80 octets payload) :
-//    2 (sync) + 4 (entête) + 80 (payload) + 2 (CRC) + 1 (flag fin) = 89 octets × 8 = 712 items
 // ------------------------------------------------------------
 void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol,
                                 uint8_t *payload, uint8_t payloadLen)
 {
     if (payloadLen > MAX_PAYLOAD) payloadLen = MAX_PAYLOAD;
 
-    // --- Calcul du CRC sur [TYPE, SEQ, LEN, VOL, PAYLOAD…] ---
+    // Calcul du CRC sur [TYPE, SEQ, LEN, VOL, PAYLOAD…]
     uint8_t crcBuf[4 + MAX_PAYLOAD];
     crcBuf[0] = type;
     crcBuf[1] = seq;
@@ -104,41 +108,34 @@ void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol,
     }
     uint16_t crc = CalculateCRC(crcBuf, 4 + payloadLen);
 
-    // --- Construction des items RMT ---
-    // Taille = (2 sync + 4 entête + payloadLen + 2 CRC + 1 flag fin) octets × 8 items
-    int totalBytes = 2 + 4 + payloadLen + 2 + 1;
+    // Construction des items RMT
+    int totalBytes = 2 + 4 + payloadLen + 2 + 1;  // sync+hdr+payload+crc+flag_fin
     int totalItems = totalBytes * 8;
 
     rmt_item32_t *items = (rmt_item32_t *)malloc(totalItems * sizeof(rmt_item32_t));
-    if (!items) return;  // allocation échouée
+    if (!items) return;
 
     int idx = 0;
 
-    // Préambule (synchronisation auto-baud côté récepteur)
-    encodeByte(items, idx, PREAMBLE);
+    encodeByte(items, idx, PREAMBLE);   // Préambule 0x55
 
-    // Flag de début
-    encodeByte(items, idx, FLAG);
+    encodeByte(items, idx, FLAG);        // Flag de début 0x7E
 
-    // Entête
-    encodeByte(items, idx, type);
+    encodeByte(items, idx, type);        // Entête
     encodeByte(items, idx, seq);
     encodeByte(items, idx, payloadLen);
     encodeByte(items, idx, vol);
 
-    // Payload
-    for (int i = 0; i < payloadLen; i++) {
+    for (int i = 0; i < payloadLen; i++) {  // Payload
         encodeByte(items, idx, payload[i]);
     }
 
-    // CRC
-    encodeByte(items, idx, (crc >> 8) & 0xFF);
+    encodeByte(items, idx, (crc >> 8) & 0xFF);  // CRC
     encodeByte(items, idx, crc & 0xFF);
 
-    // Flag de fin
-    encodeByte(items, idx, FLAG);
+    encodeByte(items, idx, FLAG);        // Flag de fin 0x7E
 
-    // --- Émission (bloquante : on attend que le RMT ait tout envoyé) ---
+    // Émission bloquante : on attend que le RMT ait tout envoyé
     _pilote->sendItems(items, idx, true);
 
     free(items);
@@ -152,11 +149,9 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
     uint8_t totalPackets = (uint8_t)((length + MAX_PAYLOAD - 1) / MAX_PAYLOAD);
     if (totalPackets == 0) totalPackets = 1;
 
-    // Trame START
     TransmitFrame(TYPE_START, 0, totalPackets, nullptr, 0);
-    vTaskDelay(5 / portTICK_PERIOD_MS);   // laisser le RX se préparer
+    vTaskDelay(5 / portTICK_PERIOD_MS);
 
-    // Trames DATA
     size_t offset = 0;
     uint8_t seq = 1;
     while (offset < length) {
@@ -164,12 +159,11 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
                             ? MAX_PAYLOAD
                             : (length - offset));
         TransmitFrame(TYPE_DATA, seq, 0, message + offset, chunkLen);
-        offset  += chunkLen;
+        offset += chunkLen;
         seq++;
         vTaskDelay(2 / portTICK_PERIOD_MS);
     }
 
-    // Trame END
     TransmitFrame(TYPE_END, seq, 0, nullptr, 0);
 }
 
@@ -180,13 +174,12 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
 // ------------------------------------------------------------
 //  decodeItem — interprète un item RMT en bit Manchester
 //
-//  Un item RMT contient deux demi-périodes (level0/duration0,
-//  level1/duration1).  En Manchester II :
-//    level0=LOW,  level1=HIGH → bit 1
-//    level0=HIGH, level1=LOW  → bit 0
+//  CORRECTIF bug #1 : la version originale avait la convention
+//  INVERSE de encodeBit.  Ici on applique la même règle :
+//    HIGH→LOW (level0=1, level1=0) → bit 1
+//    LOW→HIGH (level0=0, level1=1) → bit 0
 //
-//  On vérifie que les deux durées sont proches de halfBit
-//  (±TOLERANCE) pour rejeter les items bruités.
+//  Retourne 0 ou 1, -1 si durée incohérente.
 // ------------------------------------------------------------
 int Manchester::decodeItem(const rmt_item32_t &item, uint16_t halfBit)
 {
@@ -194,12 +187,12 @@ int Manchester::decodeItem(const rmt_item32_t &item, uint16_t halfBit)
     float lo  = halfBit - tol;
     float hi  = halfBit + tol;
 
-    bool d0h = item.duration0 >= lo && item.duration0 <= hi;
-    bool d1h = item.duration1 >= lo && item.duration1 <= hi;
+    bool d0ok = item.duration0 >= lo && item.duration0 <= hi;
+    bool d1ok = item.duration1 >= lo && item.duration1 <= hi;
 
-    if (!d0h || !d1h) return -1;
+    if (!d0ok || !d1ok) return -1;
 
-    // Convention corrigée : HIGH→LOW = bit 1, LOW→HIGH = bit 0
+    // Convention : HIGH→LOW = bit 1, LOW→HIGH = bit 0
     if (item.level0 == 1 && item.level1 == 0) return 1;
     if (item.level0 == 0 && item.level1 == 1) return 0;
 
@@ -208,14 +201,22 @@ int Manchester::decodeItem(const rmt_item32_t &item, uint16_t halfBit)
 
 // ------------------------------------------------------------
 //  decodeByte — convertit 8 items RMT consécutifs en un octet
+//
+//  CORRECTIF bug #1 : toutes les comparaisons de niveaux sont
+//  alignées sur HIGH→LOW = bit 1, LOW→HIGH = bit 0.
+//
+//  Gère les items "doubles" produits par le RMT quand deux
+//  demi-bits consécutifs de même niveau sont fusionnés :
+//    d0 double : deux demi-bits du même niveau dans duration0
+//    d1 double : le bit suivant commence dans duration1
 // ------------------------------------------------------------
 bool Manchester::decodeByte(const rmt_item32_t *items, int &idx, int total,
                              uint8_t &byteOut, uint16_t halfBit)
 {
     byteOut = 0;
     float tol = (float)halfBit * RMT_TOLERANCE;
-    float lo  = halfBit - tol;
-    float hi  = halfBit + tol;
+    float lo  = halfBit     - tol;
+    float hi  = halfBit     + tol;
     float lo2 = halfBit * 2 - tol * 2;
     float hi2 = halfBit * 2 + tol * 2;
 
@@ -235,27 +236,28 @@ bool Manchester::decodeByte(const rmt_item32_t *items, int &idx, int total,
         if (d0h && d1h) {
             // Item normal : un front propre au milieu du bit
             // HIGH→LOW = bit 1, LOW→HIGH = bit 0
-            if      (l0 == 1 && l1 == 0) byteOut |= (1 << b);
-            else if (l0 == 0 && l1 == 1) { /* bit 0 */ }
+            if      (l0 == 1 && l1 == 0) byteOut |= (1 << b);  // bit 1
+            else if (l0 == 0 && l1 == 1) { /* bit 0, rien à faire */ }
             else return false;
             idx++;
         }
         else if (d0d && d1h) {
-            // d0 est double : deux demi-bits du même niveau fusionnés par le RMT.
+            // d0 est double : deux demi-bits du même niveau fusionnés dans d0.
             // Le front de milieu de bit est dans la transition vers d1.
-            // l1 = état APRÈS le front = état de la 2e moitié du bit.
-            // HIGH→LOW : l0=1, après fusion l1=0 → bit 1
-            // LOW→HIGH : l0=0, après fusion l1=1 → bit 0
-            if      (l0 == 1 && l1 == 0) byteOut |= (1 << b);
+            // l1 = niveau APRÈS le front = second demi-bit.
+            //   l0=1 (HIGH long) puis l1=0 (LOW court) → bit 1
+            //   l0=0 (LOW long)  puis l1=1 (HIGH court) → bit 0
+            if      (l0 == 1 && l1 == 0) byteOut |= (1 << b);  // bit 1
             else if (l0 == 0 && l1 == 1) { /* bit 0 */ }
             else return false;
             idx++;
         }
         else if (d0h && d1d) {
-            // d1 est double : le bit actuel est dans d0, le bit suivant
-            // commence dans d1 (même niveau). On consomme cet item
-            // et on laisse le prochain item traiter la suite.
-            if      (l0 == 1 && l1 == 0) byteOut |= (1 << b);
+            // d1 est double : le bit actuel se termine dans d0,
+            // et d1 contient déjà le premier demi-bit du bit suivant.
+            //   l0=1 (HIGH court) puis l1=0 (LOW long) → bit 1
+            //   l0=0 (LOW court)  puis l1=1 (HIGH long) → bit 0
+            if      (l0 == 1 && l1 == 0) byteOut |= (1 << b);  // bit 1
             else if (l0 == 0 && l1 == 1) { /* bit 0 */ }
             else return false;
             idx++;
@@ -271,34 +273,27 @@ bool Manchester::decodeByte(const rmt_item32_t *items, int &idx, int total,
 //  ReceiveFrame — lit une trame complète depuis le ring-buffer RMT
 //
 //  Algorithme :
-//    1. Lecture du buffer RMT (items bruts, durées en µs)
-//    2. Auto-baud sur le préambule 0x55 : mesure des durées
-//       pour calculer halfBit réel (robustesse aux dérives)
-//    3. Balayage bit à bit pour détecter le FLAG 0x7E
-//    4. Lecture séquentielle de l'entête, du payload et du CRC
-//    5. Validation CRC
+//    1. Lecture du ring-buffer RMT (items bruts)
+//    2. Expansion en demi-bits individuels (niveau + durée)
+//    3. Auto-baud sur les premières durées
+//    4. Subdivision des demi-bits doubles
+//    5. Reconstruction du bitstream (paires de demi-bits → bit)
+//    6. Recherche du FLAG 0x7E
+//    7. Lecture séquentielle entête / payload / CRC
+//    8. Validation CRC
 // ------------------------------------------------------------
 int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol)
 {
     static rmt_item32_t items[RMT_ITEMS_MAX];
 
     int count = _pilote->readItems(items, RMT_ITEMS_MAX, 500);
-if (count <= 0) return -1;
-Serial.printf("[DEBUG] count=%d\n", count);
-
     if (count <= 0) return -1;
 
-    // -------------------------------------------------------
-    // Le RMT RX produit des items où chaque item = une paire
-    // de demi-périodes consécutives. En pratique sur ESP32 :
-    //   level0 = niveau du premier demi-bit
-    //   level1 = niveau du deuxième demi-bit
-    // On décode en expandant chaque item en demi-bits individuels,
-    // puis on regroupe par paires pour reconstruire les bits Manchester.
-    // -------------------------------------------------------
-
-    // Étape 1 : expand tous les items en demi-bits (niveau + durée)
-    // Max demi-bits = RMT_ITEMS_MAX * 2
+    // -----------------------------------------------------------
+    // Étape 1 : expansion des items en demi-bits individuels
+    // Chaque item RMT = une paire (level0/duration0, level1/duration1).
+    // On les sépare pour manipuler chaque demi-bit indépendamment.
+    // -----------------------------------------------------------
     struct HalfBitEntry { uint8_t level; uint16_t dur; };
     static HalfBitEntry hb[RMT_ITEMS_MAX * 2];
     int hbCount = 0;
@@ -314,25 +309,34 @@ Serial.printf("[DEBUG] count=%d\n", count);
 
     if (hbCount < 4) return -2;
 
-    // Étape 2 : auto-baud sur les 16 premières durées non nulles
-    uint32_t sum = 0; int n = 0;
+    // -----------------------------------------------------------
+    // Étape 2 : auto-baud sur les 16 premières durées
+    // Mesure la durée moyenne des premiers demi-bits pour s'adapter
+    // aux dérives d'horloge entre l'émetteur et le récepteur.
+    // -----------------------------------------------------------
+    uint32_t sum = 0;
+    int n = 0;
     for (int i = 0; i < hbCount && n < 16; i++) {
-        sum += hb[i].dur; n++;
+        sum += hb[i].dur;
+        n++;
     }
     uint16_t halfBit = (uint16_t)(sum / n);
     if (halfBit < 10 || halfBit > 5000) return -2;
 
     float tol = halfBit * 0.40f;
 
-    // Étape 3 : subdivise les demi-bits doubles en deux demi-bits simples
-    // Un demi-bit double = durée ≈ halfBit*2 → deux demi-bits consécutifs du même niveau
+    // -----------------------------------------------------------
+    // Étape 3 : subdivision des demi-bits doubles
+    // Quand deux demi-bits consécutifs ont le même niveau, le RMT
+    // les fusionne en un seul item de durée ≈ 2×halfBit.
+    // On les redécoupe ici pour obtenir un flux uniforme.
+    // -----------------------------------------------------------
     static HalfBitEntry hb2[RMT_ITEMS_MAX * 4];
     int hb2Count = 0;
 
     for (int i = 0; i < hbCount; i++) {
         float dur = hb[i].dur;
         if (dur >= halfBit * 2 - tol * 2 && dur <= halfBit * 2 + tol * 2) {
-            // Durée double → deux demi-bits identiques
             hb2[hb2Count++] = { hb[i].level, (uint16_t)halfBit };
             hb2[hb2Count++] = { hb[i].level, (uint16_t)halfBit };
         } else {
@@ -340,9 +344,17 @@ Serial.printf("[DEBUG] count=%d\n", count);
         }
     }
 
-    // Étape 4 : convertit les paires de demi-bits en bits Manchester
-    // Chaque bit = deux demi-bits consécutifs de niveaux opposés
-    // Convention IEEE 802.3 : LOW→HIGH = bit 1, HIGH→LOW = bit 0
+    // -----------------------------------------------------------
+    // Étape 4 : reconstruction du bitstream
+    // Chaque bit Manchester = deux demi-bits consécutifs de niveaux opposés.
+    //
+    // CORRECTIF bug #1 : convention alignée sur encodeBit :
+    //   HIGH→LOW (1→0) = bit 1
+    //   LOW→HIGH (0→1) = bit 0
+    //
+    // Si deux demi-bits consécutifs ont le même niveau, on est
+    // désynchronisé : on avance d'un demi-bit pour se recaler.
+    // -----------------------------------------------------------
     static uint8_t bitStream[RMT_ITEMS_MAX * 2];
     int bitCount = 0;
 
@@ -351,35 +363,42 @@ Serial.printf("[DEBUG] count=%d\n", count);
         uint8_t l0 = hb2[i].level;
         uint8_t l1 = hb2[i+1].level;
 
-        if (l0 == 0 && l1 == 1) {
-            bitStream[bitCount++] = 1;  // LOW→HIGH = bit 1
+        if (l0 == 1 && l1 == 0) {
+            bitStream[bitCount++] = 1;  // HIGH→LOW = bit 1
             i += 2;
-        } else if (l0 == 1 && l1 == 0) {
-            bitStream[bitCount++] = 0;  // HIGH→LOW = bit 0
+        } else if (l0 == 0 && l1 == 1) {
+            bitStream[bitCount++] = 0;  // LOW→HIGH = bit 0
             i += 2;
         } else {
-            // Niveaux identiques consécutifs = désynchronisation, avance d'un demi-bit
+            // Niveaux identiques : désynchronisation, avance d'un demi-bit
             i++;
         }
     }
 
     if (bitCount < 8) return -3;
 
-    // Étape 5 : cherche le FLAG 0x7E dans le bitStream
+    // -----------------------------------------------------------
+    // Étape 5 : recherche du FLAG 0x7E dans le bitstream
+    // On fait glisser un registre à décalage de 8 bits jusqu'à
+    // trouver la valeur 0x7E (01111110).
+    // -----------------------------------------------------------
     int flagEnd = -1;
     uint8_t shiftReg = 0;
     for (int b = 0; b < bitCount; b++) {
         shiftReg = (shiftReg << 1) | bitStream[b];
         if (shiftReg == FLAG) {
-            flagEnd = b + 1;  // index du premier bit APRÈS le FLAG
+            flagEnd = b + 1;  // premier bit après le FLAG
             break;
         }
     }
 
     if (flagEnd < 0) return -3;
 
-    // Étape 6 : lecture de l'entête et du payload depuis le bitStream
-    // Fonction lambda locale pour lire un octet depuis le bitStream
+    // -----------------------------------------------------------
+    // Étape 6 : lecture séquentielle depuis le bitstream
+    // Lambda local pour lire un octet 8 bits MSB first.
+    // MSB first cohérent avec encodeByte (boucle i=7 downto 0).
+    // -----------------------------------------------------------
     auto readByte = [&](int &pos, uint8_t &out) -> bool {
         if (pos + 8 > bitCount) return false;
         out = 0;
@@ -395,29 +414,31 @@ Serial.printf("[DEBUG] count=%d\n", count);
     if (!readByte(pos, seq))  return -4;
 
     uint8_t len;
-    if (!readByte(pos, len))   return -4;
-    if (len > MAX_PAYLOAD)     return -5;
+    if (!readByte(pos, len))  return -4;
+    if (len > MAX_PAYLOAD)    return -5;
 
-    if (!readByte(pos, vol))   return -4;
+    if (!readByte(pos, vol))  return -4;
 
+    // -----------------------------------------------------------
+    // Étape 7 : lecture du payload
+    //
+    // CORRECTIF bug #2 : la version originale avait DEUX boucles
+    // identiques qui lisaient le payload. La deuxième tentait de
+    // lire len octets supplémentaires là où il ne restait que le
+    // CRC, ce qui retournait systématiquement -6. Supprimée.
+    // -----------------------------------------------------------
     uint8_t crcBuf[4 + MAX_PAYLOAD];
-    crcBuf[0] = type; crcBuf[1] = seq; crcBuf[2] = len; crcBuf[3] = vol;
-
-    for (int k = 0; k < len; k++) {
-    if (!readByte(pos, payload[k])) {
-        // DEBUG
-        Serial.printf("[DEBUG-6] len=%d k=%d pos=%d bitCount=%d manquant=%d bits\n",
-            len, k, pos, bitCount, (len - k) * 8 - (bitCount - pos));
-        return -6;
-    }
-    crcBuf[4 + k] = payload[k];
-    }
+    crcBuf[0] = type;
+    crcBuf[1] = seq;
+    crcBuf[2] = len;
+    crcBuf[3] = vol;
 
     for (int k = 0; k < len; k++) {
         if (!readByte(pos, payload[k])) return -6;
         crcBuf[4 + k] = payload[k];
     }
 
+    // Lecture et vérification du CRC
     uint8_t crcHigh, crcLow;
     if (!readByte(pos, crcHigh)) return -7;
     if (!readByte(pos, crcLow))  return -7;

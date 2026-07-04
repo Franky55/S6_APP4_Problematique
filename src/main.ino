@@ -8,29 +8,32 @@
   Core 0 : Nœud B (récepteur principal)
   Core 1 : Nœud A (émetteur principal)
 
-  Les deux nœuds sont full-duplex : chacun a son propre
-  canal RMT TX et RMT RX. Les canaux doivent tous être distincts.
-
-  Canaux RMT utilisés :
+  Canaux RMT utilisés (mem_block_num = 1 par canal, pas de chevauchement) :
     Nœud A : TX → RMT_CHANNEL_0 | RX → RMT_CHANNEL_1
     Nœud B : TX → RMT_CHANNEL_2 | RX → RMT_CHANNEL_3
+
+  CORRECTIF bug #3 : les canaux TX/RX de chaque nœud sont maintenant
+  distincts et ne se chevauchent plus. Avec mem_block_num=1 (64 items
+  par canal), les 4 canaux utilisés occupent les blocs 0,1,2,3 sans
+  collision. rmt_write_items() gère les trames plus longues que 64
+  items automatiquement en mode bloquant.
 */
 
 #include <Arduino.h>
 #include "Manchester.h"
 
 // ----- Pins -----
-#define GPIO_TX_A 12   // Sortie du nœud A  →  entrée du nœud B
-#define GPIO_RX_A 27   // Entrée du nœud A  ←  sortie du nœud B
-#define GPIO_TX_B 26   // Sortie du nœud B  →  entrée du nœud A
-#define GPIO_RX_B 14   // Entrée du nœud B  ←  sortie du nœud A
+#define GPIO_TX_A 12   // Sortie nœud A  →  entrée nœud B (GPIO_RX_B)
+#define GPIO_RX_A 27   // Entrée nœud A  ←  sortie nœud B (GPIO_TX_B)
+#define GPIO_TX_B 26   // Sortie nœud B  →  entrée nœud A (GPIO_RX_A)
+#define GPIO_RX_B 14   // Entrée nœud B  ←  sortie nœud A (GPIO_TX_A)
 
-// ----- Instances Manchester (full-duplex) -----
-// Nœud A : TX=canal 0, RX=canal 2 (occupe 2,3,4,5)
-Manchester nodeA(GPIO_TX_A, GPIO_RX_A, RMT_CHANNEL_0, RMT_CHANNEL_2);
+// ----- Instances Manchester -----
+// Canaux 0 et 1 : non-chevauchants avec mem_block_num=1
+Manchester nodeA(GPIO_TX_A, GPIO_RX_A, RMT_CHANNEL_0, RMT_CHANNEL_1);
 
-// Nœud B : TX=canal 1, RX=canal 6 (occupe 6,7)
-Manchester nodeB(GPIO_TX_B, GPIO_RX_B, RMT_CHANNEL_1, RMT_CHANNEL_6);
+// Canaux 2 et 3 : non-chevauchants avec mem_block_num=1
+Manchester nodeB(GPIO_TX_B, GPIO_RX_B, RMT_CHANNEL_2, RMT_CHANNEL_3);
 
 // ----- Handles des tâches FreeRTOS -----
 TaskHandle_t TaskA;
@@ -45,13 +48,13 @@ void taskNodeA(void *pvParameters)
     uint8_t message[] =
         "Lorem ipsum dolor sit amet, consectetur adipiscing elit. "
         "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
-    size_t msgLen = sizeof(message) - 1; // sans le '\0'
+    size_t msgLen = sizeof(message) - 1;  // sans le '\0'
 
     for (;;)
     {
-        Serial.println("[A] >>> Début de l'envoi...");
+        Serial.println("[A] >>> Debut de l'envoi...");
         nodeA.TransmitMessage(message, msgLen);
-        Serial.println("[A] >>> Envoi terminé.");
+        Serial.println("[A] >>> Envoi termine.");
 
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
@@ -66,10 +69,9 @@ void taskNodeB(void *pvParameters)
     uint8_t frameBuffer[MAX_PAYLOAD];
     uint8_t type, seq, vol;
 
-    // Buffer de reconstitution
     uint8_t assemblyBuffer[512];
-    size_t  assemblyOffset      = 0;
-    uint8_t expectedSeq         = 1;
+    size_t  assemblyOffset       = 0;
+    uint8_t expectedSeq          = 1;
     uint8_t totalPacketsExpected = 0;
 
     for (;;)
@@ -80,16 +82,14 @@ void taskNodeB(void *pvParameters)
         {
             switch (type)
             {
-                // ---- Trame START ----
                 case TYPE_START:
                     assemblyOffset       = 0;
                     expectedSeq          = 1;
                     totalPacketsExpected = vol;
-                    Serial.printf("[B] Connexion établie — %d paquet(s) attendu(s).\n",
+                    Serial.printf("[B] Connexion etablie — %d paquet(s) attendu(s).\n",
                                   totalPacketsExpected);
                     break;
 
-                // ---- Trame DATA ----
                 case TYPE_DATA:
                     if (seq == expectedSeq)
                     {
@@ -98,7 +98,7 @@ void taskNodeB(void *pvParameters)
                             memcpy(assemblyBuffer + assemblyOffset, frameBuffer, bytesRead);
                             assemblyOffset += bytesRead;
                             expectedSeq++;
-                            Serial.printf("[B] Paquet %d/%d reçu (%d octets)\n",
+                            Serial.printf("[B] Paquet %d/%d recu (%d octets)\n",
                                           seq, totalPacketsExpected, bytesRead);
                         }
                         else
@@ -108,15 +108,14 @@ void taskNodeB(void *pvParameters)
                     }
                     else
                     {
-                        Serial.printf("[B] ERREUR séquence : reçu %d, attendu %d\n",
+                        Serial.printf("[B] ERREUR sequence : recu %d, attendu %d\n",
                                       seq, expectedSeq);
                     }
                     break;
 
-                // ---- Trame END ----
                 case TYPE_END:
-                    assemblyBuffer[assemblyOffset] = '\0'; // sécurité pour Serial.print
-                    Serial.println("[B] ====== MESSAGE RECONSTITUÉ ======");
+                    assemblyBuffer[assemblyOffset] = '\0';
+                    Serial.println("[B] ====== MESSAGE RECONSTITUE ======");
                     Serial.printf("[B] %zu octets : %s\n", assemblyOffset,
                                   (char *)assemblyBuffer);
                     Serial.println("[B] ====================================");
@@ -127,12 +126,11 @@ void taskNodeB(void *pvParameters)
                     break;
             }
         }
-        else if (bytesRead != -1) // -1 = simple timeout, pas une vraie erreur
+        else if (bytesRead != -1)  // -1 = simple timeout, pas une erreur
         {
-            Serial.printf("[B] Erreur décodage trame : code %d\n", bytesRead);
+            Serial.printf("[B] Erreur decodage trame : code %d\n", bytesRead);
         }
 
-        // Cède le CPU brièvement pour ne pas affamer les autres tâches
         vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
@@ -146,20 +144,18 @@ void setup()
     delay(1000);
 
     Serial.println("=== APP4 — Manchester RMT dual-core ===");
-    Serial.printf("Vitesse : demi-bit = %d µs  (~%.0f bps)\n",
+    Serial.printf("Vitesse : demi-bit = %d us (~%.0f bps)\n",
                   Pilote::halfBit(),
                   1e6f / (2.0f * Pilote::halfBit()));
 
-    // Nœud B sur Core 0 (démarre en premier pour être prêt avant A)
+    // Nœud B démarre en premier (doit être prêt avant que A commence à émettre)
     xTaskCreatePinnedToCore(taskNodeB, "NodeB", 8192, NULL, 2, &TaskB, 0);
     delay(100);
 
-    // Nœud A sur Core 1
     xTaskCreatePinnedToCore(taskNodeA, "NodeA", 8192, NULL, 2, &TaskA, 1);
 }
 
 void loop()
 {
-    // Tout le travail est dans les tâches FreeRTOS
     vTaskDelete(NULL);
 }

@@ -27,15 +27,23 @@ Pilote::~Pilote()
 void Pilote::initTx()
 {
     rmt_config_t cfg = {};
-    cfg.rmt_mode             = RMT_MODE_TX;
-    cfg.channel              = _chTx;
-    cfg.gpio_num             = (gpio_num_t)_pinTx;
-    cfg.mem_block_num        = 4;           // 1 bloc = 64 items → suffisant par octet
-    cfg.clk_div              = 80;          // APB 80 MHz / 80 = 1 MHz → 1 tick = 1 µs
-    cfg.tx_config.carrier_en         = false;
-    cfg.tx_config.loop_en            = false;
-    cfg.tx_config.idle_output_en     = true;
-    cfg.tx_config.idle_level         = RMT_IDLE_LEVEL_LOW;
+    cfg.rmt_mode      = RMT_MODE_TX;
+    cfg.channel       = _chTx;
+    cfg.gpio_num      = (gpio_num_t)_pinTx;
+
+    // CORRECTIF bug #3 : mem_block_num = 1 (64 items par canal).
+    // Avec 4, le canal 0 occupe les blocs 0-3 et chevauche le canal 2.
+    // Le driver rmt_write_items() gère automatiquement les trames plus
+    // longues que 64 items en mode bloquant (waitDone = true).
+    cfg.mem_block_num = 1;
+
+    // APB 80 MHz / 80 = 1 MHz → 1 tick = 1 µs
+    cfg.clk_div = 80;
+
+    cfg.tx_config.carrier_en     = false;
+    cfg.tx_config.loop_en        = false;
+    cfg.tx_config.idle_output_en = true;
+    cfg.tx_config.idle_level     = RMT_IDLE_LEVEL_LOW;
 
     ESP_ERROR_CHECK(rmt_config(&cfg));
     ESP_ERROR_CHECK(rmt_driver_install(_chTx, 0, 0));
@@ -45,8 +53,6 @@ void Pilote::initTx()
 void Pilote::sendItems(const rmt_item32_t *items, int count, bool waitDone)
 {
     if (!_txInit) return;
-    // waitDone = true  → bloque jusqu'à la fin de l'émission (pratique pour les trames)
-    // waitDone = false → retour immédiat, appeler waitTxDone() plus tard
     rmt_write_items(_chTx, items, count, waitDone);
 }
 
@@ -66,17 +72,24 @@ void Pilote::initRx()
     cfg.rmt_mode      = RMT_MODE_RX;
     cfg.channel       = _chRx;
     cfg.gpio_num      = (gpio_num_t)_pinRx;
-    cfg.mem_block_num = 4;
-    cfg.clk_div       = 80;                 // 1 tick = 1 µs, même référence que TX
+
+    // CORRECTIF bug #3 : mem_block_num = 1 (cohérent avec TX)
+    cfg.mem_block_num = 1;
+
+    // 1 tick = 1 µs, même référence que TX
+    cfg.clk_div = 80;
 
     // Filtre de bruit : impulsions < 10 µs ignorées
     cfg.rx_config.filter_en           = true;
     cfg.rx_config.filter_ticks_thresh = 10;
 
-    cfg.rx_config.idle_threshold = (uint16_t)(HALF_BIT_US * 8);
+    // CORRECTIF bug #4 : idle_threshold à 20× halfBit au lieu de 8×.
+    // 8× = 1 ms à 125 µs/demi-bit : trop court, le RMT peut couper la
+    // capture en pleine trame si le CPU tarde entre deux items.
+    // 20× = 2500 µs laisse une marge confortable.
+    cfg.rx_config.idle_threshold = (uint16_t)(HALF_BIT_US * 20);
 
     ESP_ERROR_CHECK(rmt_config(&cfg));
-    // Ring-buffer dédié RX
     ESP_ERROR_CHECK(rmt_driver_install(_chRx, RMT_RX_BUFFER_SIZE, 0));
     ESP_ERROR_CHECK(rmt_get_ringbuf_handle(_chRx, &_rxBuf));
     _rxInit = true;
@@ -118,8 +131,9 @@ int Pilote::readItems(rmt_item32_t *buf, int maxItems, uint32_t timeoutMs)
         vRingbufferReturnItem(_rxBuf, rxData);
         totalCount += count;
 
-        // Après le premier bloc, timeout court pour les suivants
+        // Après le premier bloc reçu, timeout court pour les suivants
         deadline = pdMS_TO_TICKS(10);
+        
     }
 
     return totalCount;
