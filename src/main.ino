@@ -18,8 +18,8 @@ TaskHandle_t TaskRx;
 
 // Tâche d'émission (Core 1)
 void txTask(void *pvParameters) {
-    // Message de 145 caractères (> 80) pour tester la fragmentation
-    uint8_t longMessage[] = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ";
+    // uint8_t longMessage[] = "Allo comment ca va moi ca va bien mais je veux plus que 80 octets pour voir que les 2 messages se fait envoyer, mais seulement sur max 80 octets a la fois";
+    uint8_t longMessage[] = "Voici mon uatre message qui est grand et qui est plus que 80 octes pour satifaires les demande de la prob";
     size_t messageLen = sizeof(longMessage) - 1;
 
     for(;;) {

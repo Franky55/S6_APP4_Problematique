@@ -3,6 +3,7 @@
 #define TYPE_START 0x01
 #define TYPE_DATA 0x02
 #define TYPE_END 0x03
+#define TYPE_NACK 0x04
 
 Manchester::Manchester(int _pinNum, bool _isReceiver)
 {
@@ -87,7 +88,7 @@ int Manchester::ReceiveBit(uint32_t timeoutUs)
     
     uint32_t waitStart = micros();
     // Utilisation de la variable bitDuration qui a été calculée dynamiquement !
-    while(micros() - waitStart < (bitDuration * 0.75)) {
+    while(micros() - waitStart < (bitDurationReceive * 0.75)) {
         // Attente active
     }
     
@@ -102,82 +103,53 @@ bool Manchester::ReceiveByte(uint8_t &byteOut, uint32_t timeoutUs)
         if (bit < 0) return false;
         
         currentByte |= (bit << (7 - b));
-        timeoutUs = bitDuration * 1.5; 
+        timeoutUs = bitDurationReceive * 1.5; 
     }
     byteOut = currentByte;
     return true;
 }
 
+uint32_t Manchester::MeasureBitDuration() {
+    uint32_t t[8]; 
+    uint32_t startWait = micros();
+    bool lastState = digitalRead(pinNum);
+    
+    // Attente initiale (Timeout défini par une constante, par exemple 3s)
+    while(digitalRead(pinNum) == lastState) {
+        if (micros() - startWait > 3000000UL) return 0; 
+    }
+    
+    // Capture des 8 transitions du PREAMBLE_BYTE
+    for(int i = 0; i < 8; i++) {
+        uint32_t timeout = micros();
+        while(digitalRead(pinNum) == lastState) {
+            if (micros() - timeout > 10000UL) return 0; 
+        }
+        t[i] = micros();
+        lastState = digitalRead(pinNum);
+    }
+    
+    uint32_t totalTime = t[7] - t[0]; // Durée totale pour 7 demi-bits
+    return (totalTime / 7) * 2;       // Conversion en durée de bit complet
+}
+
 int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol) 
 {
-    uint32_t t[5];
-    bool syncedT = false;
-    int bitDurationReceive;
+    // 1. AUTO-BAUD : Mesure dynamique
+    uint32_t measured = MeasureBitDuration();
+    if (measured == 0) return -1; // Échec sync
     
-    // ---------------------------------------------------------
-    // 1. AUTO-BAUD : Mesure dynamique de la durée d'un bit
-    // ---------------------------------------------------------
-    while (!syncedT) {
-        uint32_t timeout = micros();
-        bool lastState = digitalRead(pinNum);
-        
-        // Attente du tout premier front (réveil de la ligne)
-        while(digitalRead(pinNum) == lastState) {
-            if (micros() - timeout > 3000000) return -1; // Silence
-        }
-        t[0] = micros();
-        lastState = digitalRead(pinNum);
-        
-        bool good = true;
-        // Capture de 4 fronts consécutifs du préambule 0x55
-        for(int i = 1; i < 5; i++) {
-            timeout = micros();
-            while(digitalRead(pinNum) == lastState) {
-                // Timeout généreux (20ms) pour supporter des vitesses très lentes
-                if (micros() - timeout > 20000) { good = false; break; } 
-            }
-            if (!good) break;
-            t[i] = micros();
-            lastState = digitalRead(pinNum);
-        }
-        
-        if (good) {
-            // Calcul des temps entre les fronts
-            uint32_t d1 = t[1] - t[0];
-            uint32_t d2 = t[2] - t[1];
-            uint32_t d3 = t[3] - t[2];
-            uint32_t d4 = t[4] - t[3];
-            
-            // Si les durées sont constantes (tolérance de 20%), on a trouvé la vitesse !
-            uint32_t avg = (d1 + d2 + d3 + d4) / 4;
-            uint32_t maxDiff = avg / 5; 
-            
-            if (abs((int)(d1 - avg)) < maxDiff &&
-                abs((int)(d2 - avg)) < maxDiff &&
-                abs((int)(d3 - avg)) < maxDiff &&
-                abs((int)(d4 - avg)) < maxDiff) 
-            {
-                bitDurationReceive = avg; // <-- LA MAGIE EST ICI : On écrase la vitesse
-                syncedT = true;
-            }
-        }
-    }
+    bitDurationReceive = measured;
+    // Serial.printf("Sync réussie ! BitDuration détectée: %d us\n", bitDurationReceive);
 
-    // À ce stade, nous sommes pile poil après une transition de milieu de bit.
-    // On doit faire notre saut de 75% pour se synchroniser avec la boucle ReceiveBit().
-    uint32_t waitStart = micros();
-    while(micros() - waitStart < (bitDuration * 0.75)) { }
+    // 2. Chasse au START (0x7E)
+    // On doit faire un petit délai car on est au milieu d'un bit du préambule
+    delayMicroseconds(bitDurationReceive * 0.75); 
 
-
-    // ---------------------------------------------------------
-    // 2. CHASSE AU START (0x7E)
-    // ---------------------------------------------------------
     uint8_t syncReg = 0;
     bool startFound = false;
     
-    // On a "mangé" environ 5 bits du préambule pour chronométrer.
-    // On continue de lire bit par bit jusqu'à trouver le fameux 0x7E.
-    for(int attempts = 0; attempts < 20; attempts++) {
+    for(int attempts = 0; attempts < 32; attempts++) {
         int bit = ReceiveBit(bitDurationReceive * 2);
         if (bit < 0) return -2; 
         
@@ -202,7 +174,10 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
     if(!ReceiveByte(vol, bitDurationReceive * 1.5)) return -4; 
 
     uint8_t crcData[84];
-    crcData[0] = type; crcData[1] = seq; crcData[2] = len; crcData[3] = vol;
+    crcData[0] = type;
+    crcData[1] = seq; 
+    crcData[2] = len; 
+    crcData[3] = vol;
     
     for(int i = 0; i < len; i++) {
         if(!ReceiveByte(payload[i], bitDurationReceive * 1.5)) return -6; 
@@ -213,7 +188,7 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
     if(!ReceiveByte(crcHigh, bitDurationReceive * 1.5) || !ReceiveByte(crcLow, bitDurationReceive * 1.5)) return -7;
     
     uint16_t receivedCRC = (crcHigh << 8) | crcLow;
-    if(CalculateCRC(crcData, 4 + len) != receivedCRC) return len; 
+    if(CalculateCRC(crcData, 4 + len) != receivedCRC) return -8; 
 
     uint8_t endByte;
     if(!ReceiveByte(endByte, bitDurationReceive * 1.5) || endByte != startEndByte) return len; 
