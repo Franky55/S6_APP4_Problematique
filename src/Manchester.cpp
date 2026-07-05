@@ -153,7 +153,7 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
     // (défini dans Pilote.cpp : HALF_BIT_US * 20 = 2500 µs à 125 µs/demi-bit).
     // On utilise 6 ms pour avoir une marge confortable quelle que soit
     // la résolution du tick FreeRTOS (1 tick = 1 ms par défaut).
-    const TickType_t interFrameDelay = 15 / portTICK_PERIOD_MS;
+    const TickType_t interFrameDelay = 2 / portTICK_PERIOD_MS;
 
     TransmitFrame(TYPE_START, 0, totalPackets, nullptr, 0);
     vTaskDelay(interFrameDelay);
@@ -458,7 +458,6 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
     // Sans cela, des résidus dans le ring buffer peuvent perturber le
     // décodage si l'émetteur enchaîne rapidement.
     _pilote->startRx();
-    vTaskDelay(2 / portTICK_PERIOD_MS); 
 
     return (int)len;
 }
