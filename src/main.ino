@@ -49,7 +49,8 @@ void taskTX(void *pvParameters)
     // Petit délai au démarrage pour laisser la task RX s'initialiser
     vTaskDelay(200 / portTICK_PERIOD_MS);
 
-    uint8_t message[] = "Salut ca va, j'essaie de faire quelque chose de plus gros";
+    // uint8_t message[] = "Salut ca va, j'essaie de faire quelque chose de plus gros";
+    uint8_t message[] = "Salut je suis le deuxieme esp, tu es quand meme un peu a chier toi. Tu fonctionne comme des tasks comme la vie";
     size_t msgLen = sizeof(message) - 1;  // sans le '\0'
 
     for (;;)
@@ -179,12 +180,8 @@ void setup()
                   Pilote::halfBit(),
                   1e6f / (2.0f * Pilote::halfBit()));
 
-    // RX démarre en premier sur Core 0 (priorité 3)
-    xTaskCreatePinnedToCore(taskRX, "RX", 8192, NULL, 3, NULL, 0);
-
-    // TX démarre ensuite sur Core 1 (priorité 2)
-    // Le délai de 200 ms dans taskTX lui laisse le temps de s'initialiser
-    xTaskCreatePinnedToCore(taskTX, "TX", 4096, NULL, 2, NULL, 1);
+    xTaskCreate(taskRX, "RX", 8192, NULL, 3, NULL);
+    xTaskCreate(taskTX, "TX", 4096, NULL, 2, NULL);
 }
 
 void loop()
