@@ -31,38 +31,47 @@ Manchester node(GPIO_TX, GPIO_RX, RMT_CHANNEL_1, RMT_CHANNEL_0);
 // Protège Serial contre l'accès concurrent des deux tasks.
 static SemaphoreHandle_t serialMutex;
 
-// Macro thread-safe pour Serial
-#define SERIAL_PRINT(...) \
-    do { \
-        xSemaphoreTake(serialMutex, portMAX_DELAY); \
-        Serial.printf(__VA_ARGS__); \
-        xSemaphoreGive(serialMutex); \
-    } while(0)
+bool NACKReceived = false;
+int NACKResend = 0;
+bool outOfSync = false;
+int expected = 0;
 
-// ============================================================
-//  Task TX — Core 1
-//  Envoie un message toutes les 5 secondes.
-//  Modifie ce message pour personnaliser ce que cet ESP32 envoie.
-// ============================================================
-void taskTX(void *pvParameters)
-{
-    // Petit délai au démarrage pour laisser la task RX s'initialiser
-    vTaskDelay(200 / portTICK_PERIOD_MS);
 
-    // uint8_t message[] = "Salut ca va, j'essaie de faire quelque chose de plus gros";
-    uint8_t message[] = "Salut je suis le deuxieme esp, tu es quand meme un peu a chier toi. Tu fonctionne comme des tasks comme la vie";
-    size_t msgLen = sizeof(message) - 1;  // sans le '\0'
+// Tâche d'émission (Core 1)
+void taskTX(void *pvParameters) {
+    // Message de 145 caractères (> 80) pour tester la fragmentation
+    uint8_t longMessage[][80] = {
+                            {"Lorem ipsum dolor sit amet, consectetur adipiscing elit. "},
+                            {"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "},
+                            {"Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris"},
+                            {"Duis aute irure dolor in reprehenderit in voluptate velit esse. "},
+                            {"Excepteur sint occaecat cupidatat non proident,"}
+                        };
+    size_t messageLen = sizeof(longMessage) - 1;
+    int i = sizeof(longMessage) / sizeof(longMessage[0]);
 
-    for (;;)
-    {
-        SERIAL_PRINT("[TX] >>> Debut envoi (%d octets)...\n", (int)msgLen);
-
-        node.TransmitMessage(message, msgLen);
-
-        SERIAL_PRINT("[TX] >>> Envoi termine.\n");
-
-        // Attend 5 secondes avant le prochain envoi
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    for(;;) {
+        if (NACKReceived)
+        {
+            i = NACKResend - 1; // Ajuste l'index pour retransmettre le paquet NACKé
+            Serial.println(">>> NACK reçu. Réémission du message...");
+            NACKReceived = false;
+            node.TransmitMessage(longMessage[i], messageLen);
+            
+        } 
+        else if (outOfSync)
+        {
+            node.TransmitOutOfSyncMessage(expected); // Envoie le numéro de séquence attendu
+            outOfSync = false;
+        }
+        else 
+        {
+            Serial.println(">>> Début de l'envoi du grand message...");
+            node.TransmitMessage(longMessage[i], messageLen);
+            Serial.println(">>> Envoi complet terminé.");
+            i++;
+            vTaskDelay(5000 / portTICK_PERIOD_MS); // Attend 5 secondes avant de recommencer
+        }
     }
 }
 
@@ -98,7 +107,7 @@ void taskRX(void *pvParameters)
                     assemblyOffset       = 0;
                     expectedSeq          = 1;
                     totalPacketsExpected = vol;
-                    SERIAL_PRINT("[RX] Connexion etablie — %d paquet(s) attendu(s).\n",
+                    Serial.printf("[RX] Connexion etablie — %d paquet(s) attendu(s).\n",
                                  totalPacketsExpected);
                     break;
 
@@ -112,21 +121,15 @@ void taskRX(void *pvParameters)
                             memcpy(assemblyBuffer + assemblyOffset, frameBuffer, bytesRead);
                             assemblyOffset += bytesRead;
                             expectedSeq++;
-                            SERIAL_PRINT("[RX] Paquet %d/%d recu (%d octets)\n",
+                            Serial.printf("[RX] Paquet %d/%d recu (%d octets)\n",
                                          seq, totalPacketsExpected, bytesRead);
                         }
-                        else
-                        {
-                            SERIAL_PRINT("[RX] ERREUR : buffer d'assemblage plein !\n");
-                        }
-                    }
-                    else
-                    {
-                        SERIAL_PRINT("[RX] ERREUR sequence : recu %d, attendu %d\n",
-                                     seq, expectedSeq);
-                        // Remet à zéro pour attendre le prochain START
-                        assemblyOffset = 0;
-                        expectedSeq    = 1;
+                    } else {
+                        Serial.printf("[Rx] ERREUR : Paquet hors séquence ! Reçu %d, attendu %d\n", seq, expectedSeq);
+                        outOfSync = true;
+                        expected = expectedSeq; // Stocke le numéro de séquence attendu pour la retransmission
+                        // Note : Étant sur un lien filaire direct unidirectionnel (GPIO 12 -> 14), 
+                        // le récepteur ne peut pas physiquement retransmettre un paquet NACK à l'émetteur.
                     }
                     break;
 
@@ -134,19 +137,30 @@ void taskRX(void *pvParameters)
                 // Affiche le message reconstitué.
                 case TYPE_END:
                     assemblyBuffer[assemblyOffset] = '\0';
-                    SERIAL_PRINT("[RX] ====== MESSAGE RECONSTITUE ======\n");
-                    SERIAL_PRINT("[RX] %d octets : %s\n",
+                    Serial.printf("[RX] ====== MESSAGE RECONSTITUE ======\n");
+                    Serial.printf("[RX] %d octets : %s\n",
                                  (int)assemblyOffset, (char *)assemblyBuffer);
-                    SERIAL_PRINT("[RX] ====================================\n");
+                    Serial.printf("[RX] ====================================\n");
                     // Remet à zéro pour le prochain message
                     assemblyOffset = 0;
                     expectedSeq    = 1;
                     break;
 
                 default:
-                    SERIAL_PRINT("[RX] Type inconnu : 0x%02X\n", type);
+                    Serial.printf("[RX] Type inconnu : 0x%02X\n", type);
+                    break;
+                
+                case 0x04: // Trame de NACK
+                    Serial.printf("[Rx] NACK reçu pour le paquet %d. Demande de retransmission.\n", seq);
+                    NACKReceived = true;
+                    NACKResend = vol; // Stocke le numéro de séquence pour la retransmission
                     break;
             }
+        } 
+        else if (bytesRead != -1) { 
+            Serial.printf("Erreur de décodage trame. Code : %d\n", bytesRead);
+            outOfSync = true;
+            expected = expectedSeq;
         }
         else if (bytesRead == -1)
         {
@@ -155,7 +169,7 @@ void taskRX(void *pvParameters)
         else
         {
             // Vraie erreur de décodage
-            SERIAL_PRINT("[RX] Erreur decodage : code %d\n", bytesRead);
+            Serial.printf("[RX] Erreur decodage : code %d\n", bytesRead);
         }
 
         // Cède brièvement le CPU (la task RX a priorité 3, TX a priorité 2,

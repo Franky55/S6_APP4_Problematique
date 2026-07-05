@@ -28,6 +28,7 @@
 #define TYPE_START 0x01
 #define TYPE_DATA  0x02
 #define TYPE_END   0x03
+#define TYPE_OUT_OF_SYNC 0x04
 
 // Nombre maximal d'octets de payload par trame DATA
 #define MAX_PAYLOAD 30
@@ -59,7 +60,7 @@ public:
     //  -7 : erreur lecture CRC
     //  -8 : CRC invalide
     int ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol);
-
+    void TransmitOutOfSyncMessage(uint8_t seq);
 private:
     Pilote *_pilote;
 
@@ -79,6 +80,7 @@ private:
 
     static constexpr uint8_t PREAMBLE = 0x55;
     static constexpr uint8_t FLAG     = 0x7E;
+   
 };
 
 #endif // MANCHESTER_H

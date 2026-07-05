@@ -461,3 +461,7 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
 
     return (int)len;
 }
+
+void Manchester::TransmitOutOfSyncMessage(uint8_t seq) {
+    TransmitFrame(TYPE_OUT_OF_SYNC, 0, seq, NULL, 0);
+}
