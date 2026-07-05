@@ -30,7 +30,7 @@
 #define TYPE_END   0x03
 
 // Nombre maximal d'octets de payload par trame DATA
-#define MAX_PAYLOAD 80
+#define MAX_PAYLOAD 30
 
 // Taille maximale du buffer d'items RMT pour une trame complète.
 // Worst case : 2 sync + 4 entête + 80 payload + 2 CRC + 1 flag fin = 89 octets × 8 = 712 items

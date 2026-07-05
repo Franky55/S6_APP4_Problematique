@@ -1,95 +1,108 @@
 /*
-  APP4 — Communication Manchester via RMT (dual-core)
+  APP4 — Communication Manchester via RMT — Full-duplex, 2 ESP32
 
-  Câblage physique (boucle locale sur un seul ESP32) :
-    GPIO_TX_A (12) ──────────────── GPIO_RX_B (14)
-    GPIO_RX_A (27) ──────────────── GPIO_TX_B (26)
+  Chaque ESP32 est identique (même firmware).
+  Câblage entre les deux cartes :
+    ESP32_A GPIO 12 (TX) ────────── ESP32_B GPIO 27 (RX)
+    ESP32_A GPIO 27 (RX) ────────── ESP32_B GPIO 12 (TX)
+    ESP32_A GND          ────────── ESP32_B GND
 
-  Core 0 : Nœud B (récepteur principal)
-  Core 1 : Nœud A (émetteur principal)
+  Architecture FreeRTOS :
+    Task TX  (Core 1, priorité 2) : envoie un message toutes les 5 s
+    Task RX  (Core 0, priorité 3) : bloque sur ReceiveFrame() en permanence
 
-  Canaux RMT utilisés (mem_block_num = 1 par canal, pas de chevauchement) :
-    Nœud A : TX → RMT_CHANNEL_0 | RX → RMT_CHANNEL_1
-    Nœud B : TX → RMT_CHANNEL_2 | RX → RMT_CHANNEL_3
-
-  CORRECTIF bug #3 : les canaux TX/RX de chaque nœud sont maintenant
-  distincts et ne se chevauchent plus. Avec mem_block_num=1 (64 items
-  par canal), les 4 canaux utilisés occupent les blocs 0,1,2,3 sans
-  collision. rmt_write_items() gère les trames plus longues que 64
-  items automatiquement en mode bloquant.
+  Une seule instance Manchester par ESP32 :
+    TX → RMT_CHANNEL_0
+    RX → RMT_CHANNEL_1
 */
 
 #include <Arduino.h>
 #include "Manchester.h"
 
 // ----- Pins -----
-#define GPIO_TX_A 12   // Sortie nœud A  →  entrée nœud B (GPIO_RX_B)
-#define GPIO_RX_A 27   // Entrée nœud A  ←  sortie nœud B (GPIO_TX_B)
-#define GPIO_TX_B 26   // Sortie nœud B  →  entrée nœud A (GPIO_RX_A)
-#define GPIO_RX_B 14   // Entrée nœud B  ←  sortie nœud A (GPIO_TX_A)
+#define GPIO_TX 26
+#define GPIO_RX 27
 
-// ----- Instances Manchester -----
-// Canaux 0 et 1 : non-chevauchants avec mem_block_num=1
-Manchester nodeA(GPIO_TX_A, GPIO_RX_A, RMT_CHANNEL_0, RMT_CHANNEL_1);
+// ----- Instance unique Manchester -----
+// Les deux canaux RMT sont distincts et non-chevauchants (mem_block_num=1).
+Manchester node(GPIO_TX, GPIO_RX, RMT_CHANNEL_1, RMT_CHANNEL_0);
 
-// Canaux 2 et 3 : non-chevauchants avec mem_block_num=1
-Manchester nodeB(GPIO_TX_B, GPIO_RX_B, RMT_CHANNEL_2, RMT_CHANNEL_3);
+// ----- Queue de communication TX→RX (optionnel, pour debug croisé) -----
+// Protège Serial contre l'accès concurrent des deux tasks.
+static SemaphoreHandle_t serialMutex;
 
-// ----- Handles des tâches FreeRTOS -----
-TaskHandle_t TaskA;
-TaskHandle_t TaskB;
+// Macro thread-safe pour Serial
+#define SERIAL_PRINT(...) \
+    do { \
+        xSemaphoreTake(serialMutex, portMAX_DELAY); \
+        Serial.printf(__VA_ARGS__); \
+        xSemaphoreGive(serialMutex); \
+    } while(0)
 
 // ============================================================
-//  Tâche A — Core 1 : Émetteur
+//  Task TX — Core 1
 //  Envoie un message toutes les 5 secondes.
+//  Modifie ce message pour personnaliser ce que cet ESP32 envoie.
 // ============================================================
-void taskNodeA(void *pvParameters)
+void taskTX(void *pvParameters)
 {
-    uint8_t message[] =
-        "Lorem ipsum dolor sit amet, consectetur adipiscing elit. "
-        "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
+    // Petit délai au démarrage pour laisser la task RX s'initialiser
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+
+    uint8_t message[] = "Salut ca va, j'essaie de faire quelque chose de plus gros";
     size_t msgLen = sizeof(message) - 1;  // sans le '\0'
 
     for (;;)
     {
-        Serial.println("[A] >>> Debut de l'envoi...");
-        nodeA.TransmitMessage(message, msgLen);
-        Serial.println("[A] >>> Envoi termine.");
+        SERIAL_PRINT("[TX] >>> Debut envoi (%d octets)...\n", (int)msgLen);
 
+        node.TransmitMessage(message, msgLen);
+
+        SERIAL_PRINT("[TX] >>> Envoi termine.\n");
+
+        // Attend 5 secondes avant le prochain envoi
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
 // ============================================================
-//  Tâche B — Core 0 : Récepteur
-//  Reconstitue le message fragment par fragment.
+//  Task RX — Core 0
+//  Bloque sur ReceiveFrame() en permanence.
+//  Reconstruit le message complet à partir des trames DATA.
 // ============================================================
-void taskNodeB(void *pvParameters)
+void taskRX(void *pvParameters)
 {
     uint8_t frameBuffer[MAX_PAYLOAD];
     uint8_t type, seq, vol;
 
-    uint8_t assemblyBuffer[512];
+    // Buffer de reconstitution du message complet
+    static uint8_t assemblyBuffer[512];
     size_t  assemblyOffset       = 0;
     uint8_t expectedSeq          = 1;
     uint8_t totalPacketsExpected = 0;
 
     for (;;)
     {
-        int bytesRead = nodeB.ReceiveFrame(frameBuffer, type, seq, vol);
+        // ReceiveFrame bloque jusqu'à 500 ms (timeout interne).
+        // Si rien n'arrive, elle retourne -1 et on reboucle.
+        int bytesRead = node.ReceiveFrame(frameBuffer, type, seq, vol);
 
         if (bytesRead >= 0)
         {
             switch (type)
             {
+                // ---- Trame START ----
+                // Initialise l'assemblage d'un nouveau message.
                 case TYPE_START:
                     assemblyOffset       = 0;
                     expectedSeq          = 1;
                     totalPacketsExpected = vol;
-                    Serial.printf("[B] Connexion etablie — %d paquet(s) attendu(s).\n",
-                                  totalPacketsExpected);
+                    SERIAL_PRINT("[RX] Connexion etablie — %d paquet(s) attendu(s).\n",
+                                 totalPacketsExpected);
                     break;
 
+                // ---- Trame DATA ----
+                // Copie le payload dans le buffer d'assemblage.
                 case TYPE_DATA:
                     if (seq == expectedSeq)
                     {
@@ -98,40 +111,55 @@ void taskNodeB(void *pvParameters)
                             memcpy(assemblyBuffer + assemblyOffset, frameBuffer, bytesRead);
                             assemblyOffset += bytesRead;
                             expectedSeq++;
-                            Serial.printf("[B] Paquet %d/%d recu (%d octets)\n",
-                                          seq, totalPacketsExpected, bytesRead);
+                            SERIAL_PRINT("[RX] Paquet %d/%d recu (%d octets)\n",
+                                         seq, totalPacketsExpected, bytesRead);
                         }
                         else
                         {
-                            Serial.println("[B] ERREUR : buffer de reconstitution plein !");
+                            SERIAL_PRINT("[RX] ERREUR : buffer d'assemblage plein !\n");
                         }
                     }
                     else
                     {
-                        Serial.printf("[B] ERREUR sequence : recu %d, attendu %d\n",
-                                      seq, expectedSeq);
+                        SERIAL_PRINT("[RX] ERREUR sequence : recu %d, attendu %d\n",
+                                     seq, expectedSeq);
+                        // Remet à zéro pour attendre le prochain START
+                        assemblyOffset = 0;
+                        expectedSeq    = 1;
                     }
                     break;
 
+                // ---- Trame END ----
+                // Affiche le message reconstitué.
                 case TYPE_END:
                     assemblyBuffer[assemblyOffset] = '\0';
-                    Serial.println("[B] ====== MESSAGE RECONSTITUE ======");
-                    Serial.printf("[B] %zu octets : %s\n", assemblyOffset,
-                                  (char *)assemblyBuffer);
-                    Serial.println("[B] ====================================");
+                    SERIAL_PRINT("[RX] ====== MESSAGE RECONSTITUE ======\n");
+                    SERIAL_PRINT("[RX] %d octets : %s\n",
+                                 (int)assemblyOffset, (char *)assemblyBuffer);
+                    SERIAL_PRINT("[RX] ====================================\n");
+                    // Remet à zéro pour le prochain message
+                    assemblyOffset = 0;
+                    expectedSeq    = 1;
                     break;
 
                 default:
-                    Serial.printf("[B] Type inconnu : 0x%02X\n", type);
+                    SERIAL_PRINT("[RX] Type inconnu : 0x%02X\n", type);
                     break;
             }
         }
-        else if (bytesRead != -1)  // -1 = simple timeout, pas une erreur
+        else if (bytesRead == -1)
         {
-            Serial.printf("[B] Erreur decodage trame : code %d\n", bytesRead);
+            // Timeout normal : rien reçu pendant 500 ms, on reboucle silencieusement
+        }
+        else
+        {
+            // Vraie erreur de décodage
+            SERIAL_PRINT("[RX] Erreur decodage : code %d\n", bytesRead);
         }
 
-        vTaskDelay(1 / portTICK_PERIOD_MS);
+        // Cède brièvement le CPU (la task RX a priorité 3, TX a priorité 2,
+        // ce yield permet quand même à TX de s'exécuter entre deux frames)
+        taskYIELD();
     }
 }
 
@@ -141,21 +169,26 @@ void taskNodeB(void *pvParameters)
 void setup()
 {
     Serial.begin(115200);
-    delay(1000);
+    delay(500);
 
-    Serial.println("=== APP4 — Manchester RMT dual-core ===");
-    Serial.printf("Vitesse : demi-bit = %d us (~%.0f bps)\n",
+    serialMutex = xSemaphoreCreateMutex();
+
+    Serial.println("=== APP4 — Manchester RMT full-duplex ===");
+    Serial.printf("GPIO TX=%d  RX=%d\n", GPIO_TX, GPIO_RX);
+    Serial.printf("Demi-bit = %d us  (~%.0f bps)\n",
                   Pilote::halfBit(),
                   1e6f / (2.0f * Pilote::halfBit()));
 
-    // Nœud B démarre en premier (doit être prêt avant que A commence à émettre)
-    xTaskCreatePinnedToCore(taskNodeB, "NodeB", 8192, NULL, 2, &TaskB, 0);
-    delay(100);
+    // RX démarre en premier sur Core 0 (priorité 3)
+    xTaskCreatePinnedToCore(taskRX, "RX", 8192, NULL, 3, NULL, 0);
 
-    xTaskCreatePinnedToCore(taskNodeA, "NodeA", 8192, NULL, 2, &TaskA, 1);
+    // TX démarre ensuite sur Core 1 (priorité 2)
+    // Le délai de 200 ms dans taskTX lui laisse le temps de s'initialiser
+    xTaskCreatePinnedToCore(taskTX, "TX", 4096, NULL, 2, NULL, 1);
 }
 
 void loop()
 {
+    // Tout le travail est dans les tasks FreeRTOS
     vTaskDelete(NULL);
 }

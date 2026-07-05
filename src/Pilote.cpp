@@ -74,7 +74,7 @@ void Pilote::initRx()
     cfg.gpio_num      = (gpio_num_t)_pinRx;
 
     // CORRECTIF bug #3 : mem_block_num = 1 (cohérent avec TX)
-    cfg.mem_block_num = 1;
+    cfg.mem_block_num = 7;
 
     // 1 tick = 1 µs, même référence que TX
     cfg.clk_div = 80;
@@ -110,31 +110,28 @@ void Pilote::stopRx()
 int Pilote::readItems(rmt_item32_t *buf, int maxItems, uint32_t timeoutMs)
 {
     if (!_rxBuf) return 0;
-
     int totalCount = 0;
+    int chunkNum = 0;
     TickType_t deadline = pdMS_TO_TICKS(timeoutMs);
 
     while (totalCount < maxItems) {
         size_t rxSize = 0;
         rmt_item32_t *rxData = (rmt_item32_t *)xRingbufferReceive(
-            _rxBuf,
-            &rxSize,
-            deadline
+            _rxBuf, &rxSize, deadline
         );
-
         if (!rxData) break;
 
         int count = (int)(rxSize / sizeof(rmt_item32_t));
         if (totalCount + count > maxItems) count = maxItems - totalCount;
-
         memcpy(buf + totalCount, rxData, count * sizeof(rmt_item32_t));
         vRingbufferReturnItem(_rxBuf, rxData);
         totalCount += count;
-
-        // Après le premier bloc reçu, timeout court pour les suivants
+        chunkNum++;
         deadline = pdMS_TO_TICKS(10);
-        
     }
+
+    // Print APRÈS la réception, plus de risque de désync
+    Serial.printf("[DBG] %d chunks, %d items total\n", chunkNum, totalCount);
 
     return totalCount;
 }

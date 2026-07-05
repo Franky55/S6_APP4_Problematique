@@ -149,8 +149,14 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
     uint8_t totalPackets = (uint8_t)((length + MAX_PAYLOAD - 1) / MAX_PAYLOAD);
     if (totalPackets == 0) totalPackets = 1;
 
+    // Le délai inter-trames doit dépasser idle_threshold du RMT RX
+    // (défini dans Pilote.cpp : HALF_BIT_US * 20 = 2500 µs à 125 µs/demi-bit).
+    // On utilise 6 ms pour avoir une marge confortable quelle que soit
+    // la résolution du tick FreeRTOS (1 tick = 1 ms par défaut).
+    const TickType_t interFrameDelay = 15 / portTICK_PERIOD_MS;
+
     TransmitFrame(TYPE_START, 0, totalPackets, nullptr, 0);
-    vTaskDelay(5 / portTICK_PERIOD_MS);
+    vTaskDelay(interFrameDelay);
 
     size_t offset = 0;
     uint8_t seq = 1;
@@ -161,7 +167,7 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
         TransmitFrame(TYPE_DATA, seq, 0, message + offset, chunkLen);
         offset += chunkLen;
         seq++;
-        vTaskDelay(2 / portTICK_PERIOD_MS);
+        vTaskDelay(interFrameDelay);
     }
 
     TransmitFrame(TYPE_END, seq, 0, nullptr, 0);
@@ -447,6 +453,12 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
     uint16_t computedCRC = CalculateCRC(crcBuf, 4 + len);
 
     if (receivedCRC != computedCRC) return -8;
+
+    // Réinitialise le récepteur RMT explicitement pour la prochaine trame.
+    // Sans cela, des résidus dans le ring buffer peuvent perturber le
+    // décodage si l'émetteur enchaîne rapidement.
+    _pilote->startRx();
+    vTaskDelay(2 / portTICK_PERIOD_MS); 
 
     return (int)len;
 }
