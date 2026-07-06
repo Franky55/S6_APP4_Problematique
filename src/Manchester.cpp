@@ -87,6 +87,15 @@ uint16_t Manchester::CalculateCRC(uint8_t *data, size_t length)
 }
 
 // ------------------------------------------------------------
+//  DebugCorruptNextFrame — TEST UNIQUEMENT
+//  Arme la corruption de la prochaine trame émise.
+// ------------------------------------------------------------
+void Manchester::DebugCorruptNextFrame()
+{
+    _debugCorruptNext = true;
+}
+
+// ------------------------------------------------------------
 //  TransmitFrame — construit et émet une trame complète
 //
 //  Format sur le fil :
@@ -107,6 +116,19 @@ void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol,
         memcpy(crcBuf + 4, payload, payloadLen);
     }
     uint16_t crc = CalculateCRC(crcBuf, 4 + payloadLen);
+
+    // ----------------------------------------------------------
+    // TEST UNIQUEMENT : hook de corruption.
+    // On modifie le CRC ICI, APRÈS qu'il ait été calculé sur les
+    // vraies données. Le CRC transmis ne correspondra donc plus
+    // aux données reçues : ReceiveFrame() retournera -8 (CRC
+    // invalide) côté RX, ce qui est une vraie erreur de détection,
+    // pas juste un contenu faux avec un CRC qui "matche quand même".
+    // ----------------------------------------------------------
+    if (_debugCorruptNext) {
+        _debugCorruptNext = false;
+        crc ^= 0x0001;
+    }
 
     // Construction des items RMT
     int totalBytes = 2 + 4 + payloadLen + 2 + 1;  // sync+hdr+payload+crc+flag_fin

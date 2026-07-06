@@ -131,7 +131,7 @@ int Pilote::readItems(rmt_item32_t *buf, int maxItems, uint32_t timeoutMs)
     }
 
     // Print APRÈS la réception, plus de risque de désync
-    Serial.printf("[DBG] %d chunks, %d items total\n", chunkNum, totalCount);
+    //Serial.printf("[DBG] %d chunks, %d items total\n", chunkNum, totalCount);
 
     return totalCount;
 }
