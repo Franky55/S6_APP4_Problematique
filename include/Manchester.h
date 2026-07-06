@@ -13,8 +13,11 @@
 class Manchester
 {
 public:
-Manchester(int pinTx, int pinRx, rmt_channel_t chTx = RMT_CHANNEL_0, rmt_channel_t chRx = RMT_CHANNEL_1);
+Manchester(int pinTx, int pinRx,
+rmt_channel_t chTx = RMT_CHANNEL_0,
+rmt_channel_t chRx = RMT_CHANNEL_1);
 ~Manchester();
+    // Transmet un message complet (fragmentation automatique en trames DATA)
 void TransmitMessage(uint8_t *message, size_t length);
     // Reçoit une trame.
     // Retourne : nombre d'octets de payload (>= 0 : succès)
@@ -30,11 +33,33 @@ void TransmitMessage(uint8_t *message, size_t length);
 int ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol);
 void TransmitOutOfSyncMessage(uint8_t seq);
 void TransmitNACKResendMessage(uint8_t *message, size_t length, uint8_t wantedSeq);
+
+    // ------------------------------------------------------------
+    // TEST UNIQUEMENT :
+    // Arme la corruption de la PROCHAINE trame émise (TransmitFrame),
+    // quel que soit son type/seq. La corruption est appliquée sur le
+    // CRC APRÈS son calcul sur les données réelles : le CRC transmis
+    // ne correspondra donc plus aux données transmises, ce qui
+    // déclenche une vraie erreur CRC (-8) côté ReceiveFrame.
+    // ------------------------------------------------------------
     void DebugCorruptNextFrame();
+
+    // ------------------------------------------------------------
+    // TEST UNIQUEMENT :
+    // Arme la corruption du paquet DATA dont le numéro de séquence
+    // vaut exactement `seq` (1-based, celui utilisé par
+    // TransmitMessage). Peu importe qu'il ait déjà commencé à être
+    // envoyé ou non : dès que TransmitFrame(TYPE_DATA, seq, ...)
+    // correspondant est appelé, son CRC est corrompu. Se désarme
+    // automatiquement après usage.
+    // ------------------------------------------------------------
+    void DebugCorruptFrame(uint8_t seq);
 
 private:
 Pilote *_pilote;
-    bool _debugCorruptNext = false; // TEST : voir DebugCorruptNextFrame()
+    bool    _debugCorruptNext     = false; // TEST : DebugCorruptNextFrame()
+    bool    _debugCorruptSeqArmed = false; // TEST : DebugCorruptFrame(seq)
+    uint8_t _debugCorruptSeq      = 0;     // TEST : seq ciblé par DebugCorruptFrame()
 
     // TX helpers
 void encodeBit(rmt_item32_t *items, int &idx, bool bit);

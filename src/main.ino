@@ -1,24 +1,29 @@
 #include <Arduino.h>
+#include <string.h>
+#include <stdlib.h>
 #include "Manchester.h"
 
 // ----- Pins -----
 #define GPIO_TX 26
 #define GPIO_RX 27
 #define MAX_MESSAGES_SENDING 5
+#define VAL_NEXT_SEND 5000
 
 // ----- Instance unique Manchester -----
 Manchester node(GPIO_TX, GPIO_RX, RMT_CHANNEL_1, RMT_CHANNEL_0);
 
 static SemaphoreHandle_t serialMutex;
 
-bool NACKReceived = false;
-int NACKResend = 0;
-bool outOfSync = false;
-int expected = 0;
-bool keepReading = true;
+volatile bool NACKReceived = false;
+volatile int NACKResend = 0;
+volatile bool outOfSync = false;
+volatile int expected = 0;
+volatile bool keepReading = true;
+volatile int nextSend = 0;
 
 // ----- Flag de test (volatile car modifié par la task Console) -----
-volatile bool testForceDrop = false; // simule une perte de paquet DATA (déclenche NACK)
+// -3 = désactivé | -2 = "le prochain paquet, peu importe son numéro" | >=1 = numéro de paquet précis à ignorer
+volatile int testForceDropSeq = -3;
 
 // ============================================================
 //  Task TX — Core 1
@@ -36,22 +41,26 @@ void taskTX(void *pvParameters) {
     while(true) {
         if (NACKReceived)
         {
+            vTaskDelay(5 / portTICK_PERIOD_MS);
             i = i - 1;
             if (i < 0)
                 i = MAX_MESSAGES_SENDING - 1;
             size_t messageLen = sizeof(longMessage[i]) - 1;
-            Serial.println(">>> NACK reçu. Réémission du message...");
+            Serial.printf(">>> NACK reçu. Réémission du message...%d\n", NACKResend);
             NACKReceived = false;
             node.TransmitNACKResendMessage(longMessage[i], messageLen, NACKResend);
             i++;
         } 
         else if (outOfSync)
         {
+            vTaskDelay(5 / portTICK_PERIOD_MS);
+            Serial.printf(">>> Out of sync...%d\n", expected);
             node.TransmitOutOfSyncMessage(expected);
             outOfSync = false;
         }
-        else // Envoi message normal
+        else if(nextSend > VAL_NEXT_SEND)// Envoi message normal
         {
+            nextSend = 0;
             if (i >= MAX_MESSAGES_SENDING)
                 i = 0;
 
@@ -61,8 +70,10 @@ void taskTX(void *pvParameters) {
             node.TransmitMessage(longMessage[i], messageLen);
             Serial.println(">>> Envoi complet terminé.");
             i++;
-            vTaskDelay(5000 / portTICK_PERIOD_MS);
+            
         }
+        nextSend++;
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
 
@@ -102,11 +113,11 @@ void taskRX(void *pvParameters)
                 case TYPE_DATA:
 
                     // ----- Injection de test : perte volontaire d'un paquet -----
-                    if (testForceDrop)
+                    if (testForceDropSeq == (int)seq || testForceDropSeq == -2)
                     {
-                        testForceDrop = false;
                         Serial.printf("[TEST] Paquet %d volontairement ignoré (simulation de perte).\n", seq);
                         Serial.println("[TEST] Le paquet suivant devrait etre vu 'hors sequence' -> NACK.");
+                        testForceDropSeq = -3;
                         break; // on n'incrémente PAS expectedSeq : le paquet suivant sera en avance
                     }
 
@@ -122,9 +133,12 @@ void taskRX(void *pvParameters)
                         }
                     } else {
                         Serial.printf("[Rx] ERREUR : Paquet hors séquence ! Reçu %d, attendu %d\n", seq, expectedSeq);
-                        keepReading = false;
-                        outOfSync = true;
-                        expected = expectedSeq;
+                        if(keepReading)
+                        {
+                            outOfSync = true;
+                            expected = expectedSeq;
+                            keepReading = false;
+                        }
                     }
                     break;
 
@@ -146,8 +160,12 @@ void taskRX(void *pvParameters)
                 
                 case TYPE_OUT_OF_SYNC:
                     Serial.printf("[Rx] NACK reçu pour le paquet %d. Demande de retransmission.\n", seq);
-                    NACKReceived = true;
-                    NACKResend = vol;
+                    if(keepReading)
+                    {
+                        NACKReceived = true;
+                        NACKResend = vol;
+                        keepReading = false;
+                    }
                     break;
             }
         } 
@@ -155,14 +173,11 @@ void taskRX(void *pvParameters)
             Serial.printf("Erreur de décodage trame. Code : %d\n", bytesRead);
             outOfSync = true;
             expected = expectedSeq;
+            keepReading = false;
         }
         else if (bytesRead == -1)
         {
             // Timeout normal
-        }
-        else
-        {
-            Serial.printf("[RX] Erreur decodage : code %d\n", bytesRead);
         }
 
         taskYIELD();
@@ -171,35 +186,77 @@ void taskRX(void *pvParameters)
 
 // ============================================================
 //  Task Console — Core 1, priorité basse
-//  Lit le port série pour déclencher les tests.
+//  Lit le port série ligne par ligne pour déclencher les tests.
+//  Format des commandes : <lettre>[numéro]  ex: "n", "n3", "c", "c3"
 // ============================================================
+void processTestCommand(const char *cmd)
+{
+    if (cmd[0] == '\0') return;
+
+    char letter = cmd[0];
+    bool hasNumber = false;
+    int number = -1;
+
+    if (strlen(cmd) > 1) {
+        number = atoi(cmd + 1);
+        hasNumber = (number >= 1); // atoi renvoie 0 si pas un nombre valide
+    }
+
+    switch (letter)
+    {
+        case 'n':
+        case 'N':
+            if (hasNumber) {
+                testForceDropSeq = number;
+                Serial.printf("[TEST] Le paquet DATA #%d sera ignore cote RX (test NACK arme).\n", number);
+            } else {
+                testForceDropSeq = -2;
+                Serial.println("[TEST] Le PROCHAIN paquet DATA sera ignore cote RX (test NACK arme).");
+            }
+            break;
+
+        case 'c':
+        case 'C':
+            if (hasNumber) {
+                node.DebugCorruptFrame((uint8_t)number);
+                Serial.printf("[TEST] Le paquet DATA #%d aura un CRC corrompu a l'emission.\n", number);
+            } else {
+                node.DebugCorruptNextFrame();
+                Serial.println("[TEST] La PROCHAINE trame emise aura un CRC corrompu.");
+            }
+            break;
+
+        default:
+            Serial.println("[TEST] Commande inconnue. Utilise 'n[num]' ou 'c[num]', ex: n3 / c2.");
+            break;
+    }
+}
+
 void taskConsole(void *pvParameters)
 {
+    static char lineBuf[32];
+    static int  lineLen = 0;
+
     for (;;)
     {
-        if (Serial.available())
+        while (Serial.available())
         {
             char c = Serial.read();
-            switch (c)
+            if (c == '\n' || c == '\r')
             {
-                case 'n':
-                case 'N':
-                    testForceDrop = true;
-                    Serial.println("[TEST] Prochain paquet DATA sera ignoré cote RX (test NACK arme).");
-                    break;
-
-                case 'c':
-                case 'C':
-                    node.DebugCorruptNextFrame();
-                    Serial.println("[TEST] Prochaine trame emise aura un CRC corrompu (vraie erreur CRC cote RX).");
-                    break;
-
-                default:
-                    // ignore les autres caractères (retours ligne, etc.)
-                    break;
+                if (lineLen > 0)
+                {
+                    lineBuf[lineLen] = '\0';
+                    processTestCommand(lineBuf);
+                    lineLen = 0;
+                }
+            }
+            else if (lineLen < (int)sizeof(lineBuf) - 1)
+            {
+                lineBuf[lineLen++] = c;
             }
         }
-        vTaskDelay(50 / portTICK_PERIOD_MS);
+        vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }
 
@@ -218,7 +275,8 @@ void setup()
     Serial.printf("Demi-bit = %d us  (~%.0f bps)\n",
                   Pilote::halfBit(),
                   1e6f / (2.0f * Pilote::halfBit()));
-    Serial.println("Commandes: 'n' = test NACK (perte simulee) | 'c' = test corruption");
+    Serial.println("Commandes (avec Entree) : n / n<num> = test NACK | c / c<num> = test CRC");
+    Serial.println("IMPORTANT : regle le moniteur serie sur fin de ligne 'Newline' pour que les commandes soient reconnues.");
 
     xTaskCreate(taskRX,      "RX",      8192, NULL, 3, NULL);
     xTaskCreate(taskTX,      "TX",      4096, NULL, 2, NULL);
@@ -229,3 +287,5 @@ void loop()
 {
     vTaskDelete(NULL);
 }
+
+

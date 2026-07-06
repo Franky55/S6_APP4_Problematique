@@ -88,11 +88,22 @@ uint16_t Manchester::CalculateCRC(uint8_t *data, size_t length)
 
 // ------------------------------------------------------------
 //  DebugCorruptNextFrame — TEST UNIQUEMENT
-//  Arme la corruption de la prochaine trame émise.
+//  Arme la corruption de la prochaine trame émise, quel que soit
+//  son type/seq.
 // ------------------------------------------------------------
 void Manchester::DebugCorruptNextFrame()
 {
     _debugCorruptNext = true;
+}
+
+// ------------------------------------------------------------
+//  DebugCorruptFrame — TEST UNIQUEMENT
+//  Arme la corruption du paquet DATA dont le seq correspond.
+// ------------------------------------------------------------
+void Manchester::DebugCorruptFrame(uint8_t seq)
+{
+    _debugCorruptSeq = seq;
+    _debugCorruptSeqArmed = true;
 }
 
 // ------------------------------------------------------------
@@ -124,9 +135,25 @@ void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol,
     // aux données reçues : ReceiveFrame() retournera -8 (CRC
     // invalide) côté RX, ce qui est une vraie erreur de détection,
     // pas juste un contenu faux avec un CRC qui "matche quand même".
+    //
+    // Deux modes indépendants :
+    //   - _debugCorruptNext      : corrompt la toute prochaine trame,
+    //                              peu importe son type/seq.
+    //   - _debugCorruptSeqArmed  : corrompt uniquement la trame DATA
+    //                              dont le seq == _debugCorruptSeq.
     // ----------------------------------------------------------
+    bool shouldCorrupt = false;
+
     if (_debugCorruptNext) {
+        shouldCorrupt = true;
         _debugCorruptNext = false;
+    }
+    else if (_debugCorruptSeqArmed && type == TYPE_DATA && seq == _debugCorruptSeq) {
+        shouldCorrupt = true;
+        _debugCorruptSeqArmed = false;
+    }
+
+    if (shouldCorrupt) {
         crc ^= 0x0001;
     }
 
@@ -506,14 +533,13 @@ void Manchester::TransmitNACKResendMessage(uint8_t *message, size_t length, uint
     uint8_t seq = 1;
     while (offset < length) {
         uint8_t chunkLen;
-        if(wantedSeq == seq)
-        {
-            chunkLen = (uint8_t)((length - offset > MAX_PAYLOAD)
+        chunkLen = (uint8_t)((length - offset > MAX_PAYLOAD)
                             ? MAX_PAYLOAD
                             : (length - offset));
+        if(wantedSeq <= seq)
+        {
             TransmitFrame(TYPE_DATA, seq, 0, message + offset, chunkLen);
             vTaskDelay(interFrameDelay);
-            break;
         }
         offset += chunkLen;
         seq++;
