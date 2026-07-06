@@ -20,7 +20,7 @@
 // Exemples :  125 µs → ~4 kbps
 //              62 µs → ~8 kbps
 //              31 µs → ~16 kbps
-#define HALF_BIT_US   10
+#define HALF_BIT_US   50
 
 // Tolérance de ±30 % sur les durées RX pour l'auto-synchronisation
 #define RMT_TOLERANCE 0.30f
