@@ -6,7 +6,7 @@
 // ----- Pins -----
 #define GPIO_TX 26
 #define GPIO_RX 27
-#define MAX_MESSAGES_SENDING 5
+#define MAX_MESSAGES_SENDING 3
 #define VAL_NEXT_SEND 5000
 
 // ----- Instance unique Manchester -----
@@ -32,8 +32,6 @@ void taskTX(void *pvParameters) {
     uint8_t longMessage[MAX_MESSAGES_SENDING][80] = {
                             {"Premier message de test pour la transmission longue. Qui est pas trop long"},
                             {"Deuxieme message qui contient des characteres speciaux : !@#$%^&*()_+"},
-                            {"Troisieme message avec des chiffres : 42069, je connais pas d autre chiffre"},
-                            {"Quatrieme message il se peut que je n'ai pas d'inspiration pour ce message"},
                             {"Cinquieme message, le dernier de la liste, mais pas le moins important."}
                         };
     int i = 0;
