@@ -61,6 +61,7 @@ public:
     //  -8 : CRC invalide
     int ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol);
     void TransmitOutOfSyncMessage(uint8_t seq);
+    void TransmitNACKResendMessage(uint8_t *message, size_t length, uint8_t wantedSeq);
 private:
     Pilote *_pilote;
 

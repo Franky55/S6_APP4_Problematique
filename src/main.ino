@@ -22,6 +22,7 @@
 // ----- Pins -----
 #define GPIO_TX 26
 #define GPIO_RX 27
+#define MAX_MESSAGES_SENDING 5
 
 // ----- Instance unique Manchester -----
 // Les deux canaux RMT sont distincts et non-chevauchants (mem_block_num=1).
@@ -35,37 +36,43 @@ bool NACKReceived = false;
 int NACKResend = 0;
 bool outOfSync = false;
 int expected = 0;
+bool keepReading = true;
 
 
 // Tâche d'émission (Core 1)
 void taskTX(void *pvParameters) {
     // Message de 145 caractères (> 80) pour tester la fragmentation
-    uint8_t longMessage[][80] = {
+    uint8_t longMessage[MAX_MESSAGES_SENDING][80] = {
                             {"Lorem ipsum dolor sit amet, consectetur adipiscing elit. "},
                             {"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "},
                             {"Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris"},
                             {"Duis aute irure dolor in reprehenderit in voluptate velit esse. "},
                             {"Excepteur sint occaecat cupidatat non proident,"}
                         };
-    size_t messageLen = sizeof(longMessage) - 1;
-    int i = sizeof(longMessage) / sizeof(longMessage[0]);
+    int i = 0;
 
-    for(;;) {
+    while(true) {
         if (NACKReceived)
         {
-            i = NACKResend - 1; // Ajuste l'index pour retransmettre le paquet NACKé
+            i = i - 1; // Ajuste l'index pour retransmettre le paquet NACKé
+            if (i < 0)
+                i = MAX_MESSAGES_SENDING - 1;
+            size_t messageLen = sizeof(longMessage[i]) - 1;
             Serial.println(">>> NACK reçu. Réémission du message...");
             NACKReceived = false;
-            node.TransmitMessage(longMessage[i], messageLen);
-            
+            node.TransmitNACKResendMessage(longMessage[i], messageLen, NACKResend);// a checker s il faut retransmettre le message complet ou juste le volume
+            i++;
         } 
         else if (outOfSync)
         {
             node.TransmitOutOfSyncMessage(expected); // Envoie le numéro de séquence attendu
             outOfSync = false;
         }
-        else 
+        else // Envoie message normal
         {
+            if (i >= MAX_MESSAGES_SENDING)
+                i = 0;
+            size_t messageLen = sizeof(longMessage[i]) - 1;
             Serial.println(">>> Début de l'envoi du grand message...");
             node.TransmitMessage(longMessage[i], messageLen);
             Serial.println(">>> Envoi complet terminé.");
@@ -104,9 +111,14 @@ void taskRX(void *pvParameters)
                 // ---- Trame START ----
                 // Initialise l'assemblage d'un nouveau message.
                 case TYPE_START:
-                    assemblyOffset       = 0;
-                    expectedSeq          = 1;
-                    totalPacketsExpected = vol;
+                    if(keepReading)
+                    {
+                        assemblyOffset       = 0;
+                        expectedSeq          = 1;
+                        totalPacketsExpected = vol;
+                    }
+                    
+                    keepReading = true;
                     Serial.printf("[RX] Connexion etablie — %d paquet(s) attendu(s).\n",
                                  totalPacketsExpected);
                     break;
@@ -116,7 +128,7 @@ void taskRX(void *pvParameters)
                 case TYPE_DATA:
                     if (seq == expectedSeq)
                     {
-                        if (assemblyOffset + bytesRead < sizeof(assemblyBuffer))
+                        if (assemblyOffset + bytesRead < sizeof(assemblyBuffer) && keepReading)
                         {
                             memcpy(assemblyBuffer + assemblyOffset, frameBuffer, bytesRead);
                             assemblyOffset += bytesRead;
@@ -126,6 +138,7 @@ void taskRX(void *pvParameters)
                         }
                     } else {
                         Serial.printf("[Rx] ERREUR : Paquet hors séquence ! Reçu %d, attendu %d\n", seq, expectedSeq);
+                        keepReading = false;
                         outOfSync = true;
                         expected = expectedSeq; // Stocke le numéro de séquence attendu pour la retransmission
                         // Note : Étant sur un lien filaire direct unidirectionnel (GPIO 12 -> 14), 
@@ -136,21 +149,24 @@ void taskRX(void *pvParameters)
                 // ---- Trame END ----
                 // Affiche le message reconstitué.
                 case TYPE_END:
-                    assemblyBuffer[assemblyOffset] = '\0';
-                    Serial.printf("[RX] ====== MESSAGE RECONSTITUE ======\n");
-                    Serial.printf("[RX] %d octets : %s\n",
-                                 (int)assemblyOffset, (char *)assemblyBuffer);
-                    Serial.printf("[RX] ====================================\n");
-                    // Remet à zéro pour le prochain message
-                    assemblyOffset = 0;
-                    expectedSeq    = 1;
+                    
+                    if(keepReading)
+                    {
+                        assemblyBuffer[assemblyOffset] = '\0';
+                        Serial.printf("[RX] ====== MESSAGE RECONSTITUE ======\n");
+                        Serial.printf("[RX] %d octets : %s\n", (int)assemblyOffset, (char *)assemblyBuffer);
+                        Serial.printf("[RX] ====================================\n");
+                        // Remet à zéro pour le prochain message
+                        assemblyOffset = 0;
+                        expectedSeq    = 1;
+                    }
                     break;
 
                 default:
                     Serial.printf("[RX] Type inconnu : 0x%02X\n", type);
                     break;
                 
-                case 0x04: // Trame de NACK
+                case TYPE_OUT_OF_SYNC: // Trame de NACK
                     Serial.printf("[Rx] NACK reçu pour le paquet %d. Demande de retransmission.\n", seq);
                     NACKReceived = true;
                     NACKResend = vol; // Stocke le numéro de séquence pour la retransmission

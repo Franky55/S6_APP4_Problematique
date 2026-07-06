@@ -153,7 +153,7 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
     // (défini dans Pilote.cpp : HALF_BIT_US * 20 = 2500 µs à 125 µs/demi-bit).
     // On utilise 6 ms pour avoir une marge confortable quelle que soit
     // la résolution du tick FreeRTOS (1 tick = 1 ms par défaut).
-    const TickType_t interFrameDelay = 2 / portTICK_PERIOD_MS;
+    const TickType_t interFrameDelay = 5 / portTICK_PERIOD_MS;
 
     TransmitFrame(TYPE_START, 0, totalPackets, nullptr, 0);
     vTaskDelay(interFrameDelay);
@@ -464,4 +464,38 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
 
 void Manchester::TransmitOutOfSyncMessage(uint8_t seq) {
     TransmitFrame(TYPE_OUT_OF_SYNC, 0, seq, NULL, 0);
+}
+
+void Manchester::TransmitNACKResendMessage(uint8_t *message, size_t length, uint8_t wantedSeq) {
+
+    uint8_t totalPackets = (uint8_t)((length + MAX_PAYLOAD - 1) / MAX_PAYLOAD);
+    if (totalPackets == 0) totalPackets = 1;
+
+    // Le délai inter-trames doit dépasser idle_threshold du RMT RX
+    // (défini dans Pilote.cpp : HALF_BIT_US * 20 = 2500 µs à 125 µs/demi-bit).
+    // On utilise 6 ms pour avoir une marge confortable quelle que soit
+    // la résolution du tick FreeRTOS (1 tick = 1 ms par défaut).
+    const TickType_t interFrameDelay = 5 / portTICK_PERIOD_MS;
+
+    TransmitFrame(TYPE_START, 0, totalPackets, nullptr, 0);
+    vTaskDelay(interFrameDelay);
+
+    size_t offset = 0;
+    uint8_t seq = 1;
+    while (offset < length) {
+        uint8_t chunkLen;
+        if(wantedSeq == seq)
+        {
+            chunkLen = (uint8_t)((length - offset > MAX_PAYLOAD)
+                            ? MAX_PAYLOAD
+                            : (length - offset));
+            TransmitFrame(TYPE_DATA, seq, 0, message + offset, chunkLen);
+            vTaskDelay(interFrameDelay);
+            break;
+        }
+        offset += chunkLen;
+        seq++;
+    }
+
+    TransmitFrame(TYPE_END, seq, 0, nullptr, 0);
 }

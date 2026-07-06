@@ -127,7 +127,7 @@ int Pilote::readItems(rmt_item32_t *buf, int maxItems, uint32_t timeoutMs)
         vRingbufferReturnItem(_rxBuf, rxData);
         totalCount += count;
         chunkNum++;
-        deadline = pdMS_TO_TICKS(1);
+        deadline = pdMS_TO_TICKS(3);
     }
 
     // Print APRÈS la réception, plus de risque de désync
