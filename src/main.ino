@@ -6,7 +6,7 @@
 // ----- Pins -----
 #define GPIO_TX 26
 #define GPIO_RX 27
-#define MAX_MESSAGES_SENDING 3
+#define MAX_MESSAGES_SENDING 5
 #define VAL_NEXT_SEND 5000
 
 // ----- Instance unique Manchester -----
@@ -20,9 +20,6 @@ volatile bool outOfSync = false;
 volatile int expected = 0;
 volatile bool keepReading = true;
 volatile int nextSend = 0;
-
-// ----- Flag de test (volatile car modifié par la task Console) -----
-// -3 = désactivé | -2 = "le prochain paquet, peu importe son numéro" | >=1 = numéro de paquet précis à ignorer
 volatile int testForceDropSeq = -3;
 
 // ============================================================
@@ -39,7 +36,7 @@ void taskTX(void *pvParameters) {
     int i = 0;
 
     while(true) {
-        if (NACKReceived)
+        if (NACKReceived) // Envoi message NACK
         {
             vTaskDelay(5 / portTICK_PERIOD_MS);
             i = i - 1;
@@ -51,7 +48,7 @@ void taskTX(void *pvParameters) {
             node.TransmitNACKResendMessage(longMessage[i], messageLen, NACKResend);
             i++;
         } 
-        else if (outOfSync)
+        else if (outOfSync) // Envoi message out of sync
         {
             vTaskDelay(5 / portTICK_PERIOD_MS);
             Serial.printf(">>> Out of sync...%d\n", expected);
@@ -78,7 +75,7 @@ void taskTX(void *pvParameters) {
 }
 
 // ============================================================
-//  Task RX — Core 0
+//  Task RX — Core 1
 // ============================================================
 void taskRX(void *pvParameters)
 {
@@ -90,7 +87,7 @@ void taskRX(void *pvParameters)
     uint8_t expectedSeq          = 1;
     uint8_t totalPacketsExpected = 0;
 
-    for (;;)
+    while(true)
     {
         int bytesRead = node.ReceiveFrame(frameBuffer, type, seq, vol);
 
@@ -121,7 +118,7 @@ void taskRX(void *pvParameters)
                         break; // on n'incrémente PAS expectedSeq : le paquet suivant sera en avance
                     }
 
-                    if (seq == expectedSeq)
+                    if (seq == expectedSeq) // bon paquet
                     {
                         if (assemblyOffset + bytesRead < sizeof(assemblyBuffer) && keepReading)
                         {
@@ -154,10 +151,6 @@ void taskRX(void *pvParameters)
                     }
                     break;
 
-                default:
-                    Serial.printf("[RX] Type inconnu : 0x%02X\n", type);
-                    break;
-                
                 case TYPE_OUT_OF_SYNC:
                     Serial.printf("[Rx] NACK reçu pour le paquet %d. Demande de retransmission.\n", seq);
                     if(keepReading)
@@ -166,6 +159,10 @@ void taskRX(void *pvParameters)
                         NACKResend = vol;
                         keepReading = false;
                     }
+                    break;
+
+                default:
+                    Serial.printf("[RX] Type inconnu : 0x%02X\n", type);
                     break;
             }
         } 

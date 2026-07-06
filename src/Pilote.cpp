@@ -1,9 +1,5 @@
 #include "Pilote.h"
 
-// ============================================================
-//  Pilote — Implémentation
-// ============================================================
-
 Pilote::Pilote(int pinTx, int pinRx, rmt_channel_t chTx, rmt_channel_t chRx)
     : _pinTx(pinTx), _pinRx(pinRx),
       _chTx(chTx),   _chRx(chRx),
@@ -30,16 +26,8 @@ void Pilote::initTx()
     cfg.rmt_mode      = RMT_MODE_TX;
     cfg.channel       = _chTx;
     cfg.gpio_num      = (gpio_num_t)_pinTx;
-
-    // CORRECTIF bug #3 : mem_block_num = 1 (64 items par canal).
-    // Avec 4, le canal 0 occupe les blocs 0-3 et chevauche le canal 2.
-    // Le driver rmt_write_items() gère automatiquement les trames plus
-    // longues que 64 items en mode bloquant (waitDone = true).
     cfg.mem_block_num = 1;
-
-    // APB 80 MHz / 80 = 1 MHz → 1 tick = 1 µs
     cfg.clk_div = 80;
-
     cfg.tx_config.carrier_en     = false;
     cfg.tx_config.loop_en        = false;
     cfg.tx_config.idle_output_en = true;
@@ -72,21 +60,10 @@ void Pilote::initRx()
     cfg.rmt_mode      = RMT_MODE_RX;
     cfg.channel       = _chRx;
     cfg.gpio_num      = (gpio_num_t)_pinRx;
-
-    // CORRECTIF bug #3 : mem_block_num = 1 (cohérent avec TX)
     cfg.mem_block_num = 7;
-
-    // 1 tick = 1 µs, même référence que TX
     cfg.clk_div = 80;
-
-    // Filtre de bruit : impulsions < 10 µs ignorées
     cfg.rx_config.filter_en           = true;
     cfg.rx_config.filter_ticks_thresh = 10;
-
-    // CORRECTIF bug #4 : idle_threshold à 20× halfBit au lieu de 8×.
-    // 8× = 1 ms à 125 µs/demi-bit : trop court, le RMT peut couper la
-    // capture en pleine trame si le CPU tarde entre deux items.
-    // 20× = 2500 µs laisse une marge confortable.
     cfg.rx_config.idle_threshold = (uint16_t)(HALF_BIT_US * 20);
 
     ESP_ERROR_CHECK(rmt_config(&cfg));
@@ -98,7 +75,7 @@ void Pilote::initRx()
 void Pilote::startRx()
 {
     if (!_rxInit) return;
-    rmt_rx_start(_chRx, true);  // true = efface le buffer avant de démarrer
+    rmt_rx_start(_chRx, true);
 }
 
 void Pilote::stopRx()
@@ -130,7 +107,6 @@ int Pilote::readItems(rmt_item32_t *buf, int maxItems, uint32_t timeoutMs)
         deadline = pdMS_TO_TICKS(3);
     }
 
-    // Print APRÈS la réception, plus de risque de désync
     //Serial.printf("[DBG] %d chunks, %d items total\n", chunkNum, totalCount);
 
     return totalCount;

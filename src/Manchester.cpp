@@ -1,17 +1,5 @@
 #include "Manchester.h"
 
-// ============================================================
-//  Manchester — Implémentation (RMT via Pilote)
-//
-//  Convention unique dans tout ce fichier :
-//    bit 1 → HIGH puis LOW  (level0=1, level1=0)
-//    bit 0 → LOW  puis HIGH (level0=0, level1=1)
-// ============================================================
-
-// ------------------------------------------------------------
-//  Constructeur / Destructeur
-// ------------------------------------------------------------
-
 Manchester::Manchester(int pinTx, int pinRx, rmt_channel_t chTx, rmt_channel_t chRx)
 {
     _pilote = new Pilote(pinTx, pinRx, chTx, chRx);
@@ -35,11 +23,6 @@ Manchester::~Manchester()
 //
 //  Convention : bit 1 → HIGH→LOW  (front descendant au milieu)
 //               bit 0 → LOW→HIGH  (front montant au milieu)
-//
-//  CORRECTIF bug #1 : la version originale encodait bit 1 en
-//  LOW→HIGH, mais decodeItem interprétait HIGH→LOW comme bit 1.
-//  Les deux extrémités étaient inversées l'une par rapport à
-//  l'autre. Ici TX et RX utilisent la même convention.
 // ------------------------------------------------------------
 void Manchester::encodeBit(rmt_item32_t *items, int &idx, bool bit)
 {
@@ -128,20 +111,9 @@ void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol,
     }
     uint16_t crc = CalculateCRC(crcBuf, 4 + payloadLen);
 
-    // ----------------------------------------------------------
-    // TEST UNIQUEMENT : hook de corruption.
-    // On modifie le CRC ICI, APRÈS qu'il ait été calculé sur les
-    // vraies données. Le CRC transmis ne correspondra donc plus
-    // aux données reçues : ReceiveFrame() retournera -8 (CRC
-    // invalide) côté RX, ce qui est une vraie erreur de détection,
-    // pas juste un contenu faux avec un CRC qui "matche quand même".
-    //
-    // Deux modes indépendants :
-    //   - _debugCorruptNext      : corrompt la toute prochaine trame,
-    //                              peu importe son type/seq.
-    //   - _debugCorruptSeqArmed  : corrompt uniquement la trame DATA
-    //                              dont le seq == _debugCorruptSeq.
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
+    // Corruption
+    // ------------------------------------------------------------
     bool shouldCorrupt = false;
 
     if (_debugCorruptNext) {
@@ -156,6 +128,10 @@ void Manchester::TransmitFrame(uint8_t type, uint8_t seq, uint8_t vol,
     if (shouldCorrupt) {
         crc ^= 0x0001;
     }
+
+    // ------------------------------------------------------------
+    // Corruption
+    // ------------------------------------------------------------
 
     // Construction des items RMT
     int totalBytes = 2 + 4 + payloadLen + 2 + 1;  // sync+hdr+payload+crc+flag_fin
@@ -198,10 +174,6 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
     uint8_t totalPackets = (uint8_t)((length + MAX_PAYLOAD - 1) / MAX_PAYLOAD);
     if (totalPackets == 0) totalPackets = 1;
 
-    // Le délai inter-trames doit dépasser idle_threshold du RMT RX
-    // (défini dans Pilote.cpp : HALF_BIT_US * 20 = 2500 µs à 125 µs/demi-bit).
-    // On utilise 6 ms pour avoir une marge confortable quelle que soit
-    // la résolution du tick FreeRTOS (1 tick = 1 ms par défaut).
     const TickType_t interFrameDelay = 5 / portTICK_PERIOD_MS;
 
     TransmitFrame(TYPE_START, 0, totalPackets, nullptr, 0);
@@ -228,12 +200,6 @@ void Manchester::TransmitMessage(uint8_t *message, size_t length)
 
 // ------------------------------------------------------------
 //  decodeItem — interprète un item RMT en bit Manchester
-//
-//  CORRECTIF bug #1 : la version originale avait la convention
-//  INVERSE de encodeBit.  Ici on applique la même règle :
-//    HIGH→LOW (level0=1, level1=0) → bit 1
-//    LOW→HIGH (level0=0, level1=1) → bit 0
-//
 //  Retourne 0 ou 1, -1 si durée incohérente.
 // ------------------------------------------------------------
 int Manchester::decodeItem(const rmt_item32_t &item, uint16_t halfBit)
@@ -247,7 +213,6 @@ int Manchester::decodeItem(const rmt_item32_t &item, uint16_t halfBit)
 
     if (!d0ok || !d1ok) return -1;
 
-    // Convention : HIGH→LOW = bit 1, LOW→HIGH = bit 0
     if (item.level0 == 1 && item.level1 == 0) return 1;
     if (item.level0 == 0 && item.level1 == 1) return 0;
 
@@ -256,14 +221,6 @@ int Manchester::decodeItem(const rmt_item32_t &item, uint16_t halfBit)
 
 // ------------------------------------------------------------
 //  decodeByte — convertit 8 items RMT consécutifs en un octet
-//
-//  CORRECTIF bug #1 : toutes les comparaisons de niveaux sont
-//  alignées sur HIGH→LOW = bit 1, LOW→HIGH = bit 0.
-//
-//  Gère les items "doubles" produits par le RMT quand deux
-//  demi-bits consécutifs de même niveau sont fusionnés :
-//    d0 double : deux demi-bits du même niveau dans duration0
-//    d1 double : le bit suivant commence dans duration1
 // ------------------------------------------------------------
 bool Manchester::decodeByte(const rmt_item32_t *items, int &idx, int total,
                              uint8_t &byteOut, uint16_t halfBit)
@@ -324,19 +281,6 @@ bool Manchester::decodeByte(const rmt_item32_t *items, int &idx, int total,
     return true;
 }
 
-// ------------------------------------------------------------
-//  ReceiveFrame — lit une trame complète depuis le ring-buffer RMT
-//
-//  Algorithme :
-//    1. Lecture du ring-buffer RMT (items bruts)
-//    2. Expansion en demi-bits individuels (niveau + durée)
-//    3. Auto-baud sur les premières durées
-//    4. Subdivision des demi-bits doubles
-//    5. Reconstruction du bitstream (paires de demi-bits → bit)
-//    6. Recherche du FLAG 0x7E
-//    7. Lecture séquentielle entête / payload / CRC
-//    8. Validation CRC
-// ------------------------------------------------------------
 int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint8_t &vol)
 {
     static rmt_item32_t items[RMT_ITEMS_MAX];
@@ -400,15 +344,8 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
     }
 
     // -----------------------------------------------------------
-    // Étape 4 : reconstruction du bitstream
-    // Chaque bit Manchester = deux demi-bits consécutifs de niveaux opposés.
-    //
-    // CORRECTIF bug #1 : convention alignée sur encodeBit :
-    //   HIGH→LOW (1→0) = bit 1
-    //   LOW→HIGH (0→1) = bit 0
-    //
-    // Si deux demi-bits consécutifs ont le même niveau, on est
-    // désynchronisé : on avance d'un demi-bit pour se recaler.
+    // Étape 4 : reconstruction du bitstream Manchester
+    // Chaque bit = une paire de demi-bits (HIGH→LOW = 1,
     // -----------------------------------------------------------
     static uint8_t bitStream[RMT_ITEMS_MAX * 2];
     int bitCount = 0;
@@ -434,8 +371,6 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
 
     // -----------------------------------------------------------
     // Étape 5 : recherche du FLAG 0x7E dans le bitstream
-    // On fait glisser un registre à décalage de 8 bits jusqu'à
-    // trouver la valeur 0x7E (01111110).
     // -----------------------------------------------------------
     int flagEnd = -1;
     uint8_t shiftReg = 0;
@@ -451,8 +386,6 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
 
     // -----------------------------------------------------------
     // Étape 6 : lecture séquentielle depuis le bitstream
-    // Lambda local pour lire un octet 8 bits MSB first.
-    // MSB first cohérent avec encodeByte (boucle i=7 downto 0).
     // -----------------------------------------------------------
     auto readByte = [&](int &pos, uint8_t &out) -> bool {
         if (pos + 8 > bitCount) return false;
@@ -476,11 +409,6 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
 
     // -----------------------------------------------------------
     // Étape 7 : lecture du payload
-    //
-    // CORRECTIF bug #2 : la version originale avait DEUX boucles
-    // identiques qui lisaient le payload. La deuxième tentait de
-    // lire len octets supplémentaires là où il ne restait que le
-    // CRC, ce qui retournait systématiquement -6. Supprimée.
     // -----------------------------------------------------------
     uint8_t crcBuf[4 + MAX_PAYLOAD];
     crcBuf[0] = type;
@@ -503,9 +431,6 @@ int Manchester::ReceiveFrame(uint8_t *payload, uint8_t &type, uint8_t &seq, uint
 
     if (receivedCRC != computedCRC) return -8;
 
-    // Réinitialise le récepteur RMT explicitement pour la prochaine trame.
-    // Sans cela, des résidus dans le ring buffer peuvent perturber le
-    // décodage si l'émetteur enchaîne rapidement.
     _pilote->startRx();
 
     return (int)len;
@@ -519,11 +444,6 @@ void Manchester::TransmitNACKResendMessage(uint8_t *message, size_t length, uint
 
     uint8_t totalPackets = (uint8_t)((length + MAX_PAYLOAD - 1) / MAX_PAYLOAD);
     if (totalPackets == 0) totalPackets = 1;
-
-    // Le délai inter-trames doit dépasser idle_threshold du RMT RX
-    // (défini dans Pilote.cpp : HALF_BIT_US * 20 = 2500 µs à 125 µs/demi-bit).
-    // On utilise 6 ms pour avoir une marge confortable quelle que soit
-    // la résolution du tick FreeRTOS (1 tick = 1 ms par défaut).
     const TickType_t interFrameDelay = 5 / portTICK_PERIOD_MS;
 
     TransmitFrame(TYPE_START, 0, totalPackets, nullptr, 0);
