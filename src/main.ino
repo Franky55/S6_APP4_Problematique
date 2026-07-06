@@ -30,11 +30,11 @@ volatile int testForceDropSeq = -3;
 // ============================================================
 void taskTX(void *pvParameters) {
     uint8_t longMessage[MAX_MESSAGES_SENDING][80] = {
-                            {"Lorem ipsum dolor sit amet, consectetur adipiscing elit. "},
-                            {"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "},
-                            {"Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris"},
-                            {"Duis aute irure dolor in reprehenderit in voluptate velit esse. "},
-                            {"Excepteur sint occaecat cupidatat non proident,"}
+                            {"Premier message de test pour la transmission longue."},
+                            {"Deuxieme message qui contient des characteres speciaux : !@#$%^&*()_+"},
+                            {"Troisieme message avec des chiffres : 1234567890 42069"},
+                            {"Quatrieme message il se peut que je n'ai pas d'inspiration pour ce message"},
+                            {"Cinquieme message, le dernier de la liste, mais pas le moins important."}
                         };
     int i = 0;
 
